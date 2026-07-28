@@ -1,0 +1,16 @@
+Copyright (c) 2026 Rafael
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software, to run and use the software solely for private, 
+non-commercial purposes.
+
+The following actions are EXPRESSLY PROHIBITED:
+1. Commercial use, sale, rental, or monetization of the software or any 
+   portion thereof in any form.
+2. Redistribution, publication, or provision of the source code or compiled 
+   binaries to third parties (outside of standard GitHub view and fork features).
+3. Creation of derivative works for public distribution.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR 
+IMPLIED. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY 
+CLAIM, DAMAGES OR OTHER LIABILITY.
