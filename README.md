@@ -1,2 +1,2 @@
 # Minecraft_AI_Structure_Generator
-blohhhhhhh
+This is a project where I tried to create an AI Model that can generate Minecraft structures.
