@@ -1,0 +1,8 @@
+Prompt1:
+"Generate a tall, robust medieval fantasy tower in Minecraft. The main body of the tower should be thick and constructed from a mix of standard and mossy stone bricks. It features small windows framed with wooden planks and fences. The upper section of the tower transitions into a wooden structure with large, circular arched openings on all sides. Inside this open-air top room, place a simple stone pedestal in the center. Cap the tower with a striking, steep conical roof made of dark green blocks."
+
+Prompt2:
+"Build a classic fantasy wizard's watchtower in Minecraft. The sturdy base is made of heavily textured grey stone bricks with mossy patches. The top features a wooden observation room with large, unglazed arched windows allowing a clear view inside to a small stone altar. Top the structure with a prominent, dark green pointed roof to contrast with the grey stone and brown wood."
+
+Prompt3:
+"Create a tall Minecraft stone brick tower with a dark green pointed roof. The upper floor should be made of wood with large round window openings, revealing an empty room with a small stone table in the middle. Add some mossy stone details to the lower grey walls."

@@ -1,0 +1,13 @@
+{
+  "prompt": "small medieval wooden cottage with stone foundatio",
+  "model": "transformer_diffusion",
+  "temperature": 0.0,
+  "top_k": 40,
+  "grid_size": [
+    25,
+    25,
+    27
+  ],
+  "timestamp": "20260716_072214",
+  "block_count": 306
+}

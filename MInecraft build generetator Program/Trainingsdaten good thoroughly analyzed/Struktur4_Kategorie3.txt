@@ -1,0 +1,8 @@
+Prompt1:
+"Generate a medium-sized Steampunk airship in Minecraft. The main air envelope (the gas bag) should be constructed from a mixture of grey stone and polished diorite block variations to create a textured, armored look. This entire envelope must be reinforced by an exterior framework skeleton built from dark oak logs and planks. The gondola underneath should be a small, detailed ship's body made of dark wood, with windows, trapdoors as shutters, and a simple row of propellers at the stern."
+
+Prompt2:
+"Please create a compact, detailed fantasy airship in Minecraft. The airship should have a sturdy, armored feel, combining dark wood framing with a textured grey and white stone-like air envelope. The gondola is a quaint, dark wood ship with a cozy interior hint, and small, warm windows. It is floating high above a vast, peaceful flat plain. I want the mood to be adventurous and sturdy. Functional details like a steering mechanism and small rudders are required."
+
+Prompt3:
+"Build a medium-sized Minecraft Steampunk airship. The main air bag is made of textured stone with a detailed dark wood support frame. The gondola below is a detailed dark wood ship with small windows. Add a simple row of small, glowing lanterns along the bottom edge of the gondola for a warm detail."

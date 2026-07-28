@@ -1,0 +1,5 @@
+A simple functional medium-sized house with easy to obtain materials: mainly stone bricks and wood and a lot of storage.
+---
+Build a simple functional medium-sized house with easy to obtain materials and simple furniture. I want an enormous amount of storage.
+---
+Generate a simple medium-sized survival friendly house using easy to obtain materials, simple furniture and a lot of chests.

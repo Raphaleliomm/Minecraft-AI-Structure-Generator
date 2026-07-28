@@ -1,0 +1,5 @@
+Can you generate a multi-level alpine Minecraft cottage featuring a heavy stone-brick arched foundation on the lower level, a warm overhanging wooden block structure for the main body, and a large, steeply pitched wooden gabled roof?
+---
+A beautifully detailed, multi-level medieval fantasy cottage featuring a sturdy stone-brick base and a warm, overhanging wooden structure. Complete with cozy flower boxes, hanging lanterns, an open-air balcony, and a fully furnished three-story interior (workshop, living area, and attic study), it balances aesthetic charm with survival functionality.
+---
+Create a multi level medieval fantasy cottage.

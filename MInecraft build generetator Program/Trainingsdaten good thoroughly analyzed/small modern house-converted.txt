@@ -1,0 +1,5 @@
+create a simple modern house for Minecraft with two floors and a pool. It should have no Interior.
+---
+A small modern house.
+---
+Could you please generate a small Minecraft modern house with a pool.

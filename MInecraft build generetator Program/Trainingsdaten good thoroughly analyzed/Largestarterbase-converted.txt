@@ -1,0 +1,7 @@
+Can you build a large Minecraft starter base with a barn-style exterior, a complete interior including a kitchen, enchanting area, storage, library, bedroom, a small farm, and a fenced area for animals?
+---
+Generate a large Minecraft starter base with a rustic barn-inspired design. The house should be primarily built from spruce, oak and stone bricks
+The build should include a full interior with a kitchen, furnaces, enchanting area, a small library with chiseled bookshelves, storage space, and a bedroom.
+Attached to the house should be a fenced crop farm for growing food and a separate fenced animal enclosure for livestock. The overall design should be practical for early survival gameplay while remaining highly detailed and cozy. The structure should have clean structural supports, no floating blocks, and be fully walkable.
+---
+Can you build a large Minecraft barn-style starter base with a full interior, kitchen, furnaces, storage, enchanting area, library, bedroom, crop farm, and animal pen?

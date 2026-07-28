@@ -1,0 +1,18 @@
+{
+  "theme": "dark",
+  "grid_size": [
+    16,
+    16,
+    16
+  ],
+  "default_model": "transformer",
+  "default_transformer_name": "voxel_transformer_scaled",
+  "default_diffusion_name": null,
+  "temperature": 0.85,
+  "top_k": 40,
+  "diffusion_steps": 50,
+  "export_directory": "exports",
+  "projects_directory": "projects",
+  "language": "de",
+  "gpu_enabled": true
+}

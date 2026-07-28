@@ -1,0 +1,5 @@
+A three story medieval like house with full Interior. the top floor is for working, with enchanting table smithing table and storage plus extra. The middle should have a bed and the bottom is for eating. I hate chests, i dont want chests.
+---
+generate a detailed medieval survival-friendly half-timbered house consisting of three floors for Minecraft, the walls of the ground floor are made of stone bricks and should be partially mossy, the walls of the first floor are made of sandstone and partially cut sandstone, the walls of the second and top floor are made of deepslate bricks, partially cracked, roof made of spruce stairs, the ground floor serves as a dining area with a large table and a painting on the wall, the first floor is the sleeping area with a bunk bed and a small table and should have windows, the second floor is the functional area with storage (barrels and an ender chest), furnaces, an anvil, a smithing table, a brewing stand, a crafting table, shelves, an armor stand with armor, an enchanting table with bookshelves, and a grindstone.
+---
+Could you please generate a three story medieval building, with interior.

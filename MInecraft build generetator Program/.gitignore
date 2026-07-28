@@ -1,0 +1,9 @@
+__pycache__/
+.pytest_cache/
+.tmp/
+pytest-cache-files-*/
+runs/
+test_outputs/
+generated.schem
+generated*.schem
+*.pt

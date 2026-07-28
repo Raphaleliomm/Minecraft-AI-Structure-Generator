@@ -1,0 +1,5 @@
+A simple medieval stiled forge. Fully decorated.
+---
+Generate a very detailed semi-open forge with what a blacksmith in Minecraft needs for his work, like an anvil, a basin filled with lava, a cauldron with water and light sources (lanterns and torches)
+---
+Can you generate the house of an average medieval blacksmith, with his tools and complete Interior. Half open.

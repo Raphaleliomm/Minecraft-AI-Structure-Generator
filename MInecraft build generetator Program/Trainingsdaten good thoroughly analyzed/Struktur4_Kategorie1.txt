@@ -1,0 +1,8 @@
+Prompt1:
+"Generate a medium-sized, sturdy Minecraft house. The most prominent feature must be a massive, steep roof made of dark deepslate tiles. The main walls should be built using a clean white block like calcite, heavily framed by thick oak wood logs and wooden overhangs. The house sits on a raised stone foundation with a short stone staircase leading to the front doors. On the back, include a tall red brick chimney with smoke rising from it, and add some vines crawling up the wooden walls. Surround the entire base of the house with a thick, neat border of leaf blocks. Hang lanterns from the wooden pillars for warm outdoor lighting."
+
+Prompt2:
+"Build a cozy but heavy-looking medieval-fantasy home in Minecraft. Focus on high contrast: use a very dark, heavy stone roof against bright white walls, supported by thick wooden beams. Include a smoking brick chimney and decorate the eaves with hanging lanterns. Wrap the raised stone porch completely in lush green leaf bushes."
+
+Prompt3:
+"Create a medium-sized Minecraft house with a huge, dark sloped roof and white walls framed by oak logs. Include a raised stone base, a brick chimney with smoke on the back, and a simple, continuous border of leaf bushes wrapping around the bottom of the house."

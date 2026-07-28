@@ -1,0 +1,8 @@
+Prompt1:
+"Generate a medium-sized, two-story rustic Minecraft house. The architectural style should feature oak plank walls, a spruce wood roof, and prominent stone brick pillars on the outer corners. Include a small side overhang with a wooden fence. The exterior must be surrounded by a natural garden filled with  spruce trees, poppies, dandelions, and cornflowers. For the interior, design two distinct floors. The ground floor should be a storage workshop with a stone brick floor, numerous barrels, and double chests. The upper floor should be a cozy living space featuring wooden floors, a large red carpet area, a red bed, an interior fence railing, and a small shelf holding a lantern and a potted cornflower."
+
+Prompt2:
+"Please build a medium wooden forester's lodge in Minecraft,. The building should have two stories, combining basic wood planks with sturdy stone accents on the corners to give it a robust look. Surround the lodge with a dense, overgrown garden featuring several pine trees and scattered colorful wildflowers in the tall grass. Also, add a small covered patio on one side.
+
+Prompt3:
+"Design a classic medium-sized Minecraft crafter's home. It should feel like a cozy, established base for a survival player. Build it as a two-story wooden cabin with stone pillars. The mood should be warm and inviting despite it being nighttime outside, with warm torch and lantern light visible through the large glass windows. Give it a lively front yard with spruce trees and a mix of blue, red, and yellow flowers. Inside, create a functional layout: the bottom floor should serve as a practical storage and crafting room filled with barrels, while the top floor acts as a safe, warm bedroom dominated by a large red rug and a comfortable red bed."

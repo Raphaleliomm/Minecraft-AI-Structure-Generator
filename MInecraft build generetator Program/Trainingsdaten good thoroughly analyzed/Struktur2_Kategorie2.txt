@@ -1,0 +1,8 @@
+Prompt1:
+"Generate a medium-sized, weathered medieval stone tower with a small attached house in Minecraft. Use a highly textured block palette for the walls, mixing cobblestone, stone bricks, and mossy stone variants to make it look old and ruined. The tall tower should transition into a wooden top section with a steep, pointed dark roof. The attached smaller building must feature a dark deepslate roof and a prominent red brick chimney with smoke rising from it. Use wooden trapdoors for the windows. Surround the build with a small, wild garden featuring pine trees, tall grass, and a few scattered dandelions and cornflowers."
+
+Prompt2: 
+"Please build an old, rustic wizard's tower in Minecraft. The atmosphere should feel ancient and slightly mysterious. The main structure is a tall, sturdy stone tower with a wooden observation deck and a pointed dark roof, accompanied by a small adjoining cottage with a brick chimney. The exterior should look highly detailed and textured, using aged stone materials. Add a cozy, overgrown yard with custom spruce trees and colorful wildflowers."
+
+Prompt3: 
+"Create a classic Minecraft medieval watchtower and attached living quarters. The build should be medium-sized. The tower needs a solid stone base that looks slightly overgrown, topped with a wooden cabin-like structure and a pointed roof. Connect a small stone house to the side, featuring a dark roof and a smoking brick chimney to give it a warm, lived-in feel. Decorate the outside with wooden trapdoor shutters. Place the structure in a natural grassy area with a few pine trees and basic flowers."

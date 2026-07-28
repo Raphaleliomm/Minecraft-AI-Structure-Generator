@@ -1,0 +1,5 @@
+Generate a vanilla Minecraft Plains Village Blacksmith.
+---
+Build a vanilla Minecraft village forge.
+---
+Create a Minecraft plains village smithy.
