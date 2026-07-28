@@ -1,0 +1,5 @@
+create a decorated Netherportal for Minecraft, using deepslate, and soul lanterns as light decor.
+---
+Build a small lit Nether portal using deepslate as the primary material and soul lanterns for ambient lighting.
+---
+Generate a small deepslate Nether portal with symmetrical architecture and soul lantern lighting.

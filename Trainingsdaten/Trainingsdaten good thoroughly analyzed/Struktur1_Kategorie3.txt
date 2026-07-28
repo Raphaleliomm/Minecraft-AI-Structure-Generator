@@ -1,0 +1,8 @@
+Prompt1: 
+"Generate a large steampunk-style Minecraft airship hovering mid-air. The structure is divided into two main parts. The top is a massive, oval-shaped balloon made of white wool blocks, featuring a horizontal decorative trim made of dark oak wood and fences wrapping around its equator. Suspended directly below the balloon by iron chains is a wooden ship's hull. Use dark oak wood for the outer hull and lighter spruce planks for the open deck. Decorate the deck with a few scattered leaf blocks to add greenery, and hang lanterns from the chains and place them on the deck for warm lighting. There is no enclosed interior, only the open-air deck."
+
+Prompt2:
+"Please build a medium-sized fantasy flying ship in Minecraft. The build should capture the whimsical atmosphere of an airborne adventurer's vessel. It features a classic white hot air balloon structure that supports a sturdy, boat-like wooden gondola underneath. The boat is securely attached to the balloon using strong metal chains. Make the open deck of the boat look cozy and lived-in by adding some leafy bushes and warm lantern light.
+
+Prompt3:
+"Create a classic Minecraft airship floating in the sky. The build should feature a large, white balloon on top with a distinctive wooden ring around its middle. Underneath, hang a dark wooden boat using chains. Keep the overall design simple but highly recognizable. Add a few lanterns for illumination and some leaf blocks on the boat's deck for a touch of nature. The ship should have an open-deck layout."

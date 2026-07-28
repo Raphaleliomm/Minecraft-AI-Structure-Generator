@@ -1,0 +1,8 @@
+Prompt1:
+"Generate a unique, asymmetrical fantasy flying ship in Minecraft. The hull is built from dark wood. Instead of a balloon, the ship features a central wooden mast with jagged, dark blue sails. Beneath the main hull, include abstract downward-pointing structures made of dark wood and dark blue blocks, resembling magical fins or landing gear. Make the wooden deck look functional and slightly cluttered by adding a furnace, wooden fences, ladders, stone slabs, and a few white blocks. The overall shape should feel magical and slightly chaotic."
+
+Prompt2:
+"Build a magical airborne wooden ship in Minecraft. The main body is constructed from dark brown wood. It has a single mast with blocky, dark blue sails. The most striking feature is underneath the ship: add large, fin-like appendages pointing downward, using a mix of dark wood and dark blue blocks. Decorate the small open deck with practical survival items like a furnace, fences, and some stone slabs."
+
+Prompt3:
+"Create a small Minecraft flying ship made of dark wood with dark blue blocky sails. Add distinctive blue and brown wooden fin structures hanging down from the bottom of the hull. Keep the deck details simple but include a furnace and some wooden fences."

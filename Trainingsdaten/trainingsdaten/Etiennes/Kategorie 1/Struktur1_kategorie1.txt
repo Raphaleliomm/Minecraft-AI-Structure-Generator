@@ -1,0 +1,8 @@
+Prompt1:
+"Generate a small, cozy Minecraft survival cabin. The exterior must feature a stone brick foundation, oak wood walls, and a sloped spruce wood roof with a small chimney. Surround the house with a wild, natural garden including spruce trees, tall grass, dandelions, and cornflowers. Add a dirt path leading to the front double doors. For the interior, I want a warm, fully furnished atmosphere. Cover the entire floor with red carpet. Include large storage chests, furnaces, a brown bed, and decorative items on the windowsill like a lantern, an empty flower pot, and a creeper head."
+
+Prompt2:
+"Please build a small to medium rustic forester's hut in Minecraft that fits perfectly into a moody, rainy forest atmosphere. The house should be made primarily of basic wood blocks with a sturdy stone base. I want a highly overgrown, natural yard around it with a few pine trees and scattered blue and yellow flowers. Do not include any interior decoration; please leave the inside completely empty so I can design the interior layout myself later. Make sure there is a simple dirt path leading up to the entrance."
+
+Prompt3:
+"Create a small, classic Minecraft starter house. It should feel cozy and safe, like a perfect early-game base. Use mostly wood logs and planks. The outside should have a cute little garden area with a few trees and a dirt walkway leading up to the door. Inside, make it a fully functional living space with red carpet, a bed, crafting areas, and plenty of chest storage. Give it a warm vibe with a lantern in the window."

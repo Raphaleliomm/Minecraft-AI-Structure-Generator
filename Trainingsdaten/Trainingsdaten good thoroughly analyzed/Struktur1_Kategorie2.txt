@@ -1,0 +1,9 @@
+Prompt1:
+"Generate a medium-sized medieval guardpost. The structure must consist of two connected parts: a small wooden cabin and a tall watchtower. Build the tower's core using a mix of stone bricks and mossy stone bricks, framed by vertical oak logs. Top the tower with a wooden observation deck, a sloped spruce roof, and a prominent red flag. The attached cabin should be made of wooden planks with a sloped roof featuring some stone slabs. In front of the cabin, add a small, simple garden enclosed by a wooden fence, decorated with tall grass and yellow dandelions. Include a tiny planter box with a blue flower on the side."
+
+Prompt2:
+"Please create a moody, scene featuring a rustic wooden outpost with an attached tall stone watchtower. The structure should feel like a sturdy, lonely guard station. The tall tower is the focal point, featuring heavily weathered stone textures and a bright red banner at the very peak to signal its location. The attached living quarters should look cozy from the outside"
+
+Prompt3:
+"Build a medium-sized Minecraft watchtower base. The build should feature a tall, square stone tower with a wooden roof and a red flag, seamlessly connected to a smaller wooden house. Use a classic block palette of wood loogs, planks, and stone bricks. Add a little fenced-in yard with a few flowers at the front to give it a slightly welcoming vibe despite being a military structure. Keep the design simple and structurally grounded."
+

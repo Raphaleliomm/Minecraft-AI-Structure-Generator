@@ -1,0 +1,8 @@
+Prompt1:
+"Generate a small, rustic medieval Minecraft build, consisting of a main house and an attached narrow stone tower. The walls should be built using a textured mix of stone bricks and regular stone, framed by vertical oak logs. The main house features a sloped roof made of a highly textured mix of red bricks and brown masonry blocks, and includes narrow windows with yellow and orange stained glass. The attached tall tower has a steep, pointed wooden roof, a tall vertical window barred with wooden fences, and some ladders on the side. Hang lanterns from the wooden eaves for detail."
+
+Prompt2:
+"Build a quaint fantasy village chapel tin Minecraft. The structure is made of grey stone with wooden framing. It features a main building with a striking, patchwork-style roof made of red bricks mixed with brown stone, and warm yellow-orange stained glass windows. Attached to the front corner is a slender, tall stone tower topped with a pointed wooden roof. Decorate the exterior with hanging lanterns."
+
+Prompt3:
+"Create a small Minecraft stone house with an attached narrow tower. The main house needs a textured red brick and brown stone roof, plus yellow stained glass windows. The tower should have a pointed wooden roof. Add wooden framing and hanging lanterns for a cozy medieval vibe."

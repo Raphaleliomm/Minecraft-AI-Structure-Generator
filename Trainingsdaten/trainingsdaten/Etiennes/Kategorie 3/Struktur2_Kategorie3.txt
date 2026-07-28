@@ -1,0 +1,8 @@
+Prompt1:
+"Generate a large fantasy airship floating in the night sky in Minecraft. The massive, oval-shaped balloon should be made of white blocks, heavily caged in a framework of dark wood bands running horizontally and vertically. A classic wooden ship's hull hangs beneath it, securely attached by iron chains and thick wooden supports. Include a wooden tail structure extending from the back of the balloon down to the stern of the ship. Hang several lanterns from chains beneath the balloon to warmly illuminate the ship's open wooden deck."
+
+Prompt2:
+"Build a robust fantasy airship in Minecraft. It features a large white hot-air balloon encased in a sturdy, cage-like wooden framework. Suspended directly below is a classic wooden boat hull serving as the main gondola. Connect the two parts using chains and vertical wooden beams. Add glowing lanterns dangling from the bottom of the balloon to cast a warm light over the empty wooden deck."
+
+Prompt3:
+"Create a large Minecraft airship. The build consists of a huge white balloon wrapped in a dark wood frame, connected by chains and wooden struts to a wooden boat hanging underneath. Add a wooden rudder structure at the back and some hanging lanterns for cozy lighting. Keep the design heavy and steampunk-inspired."

@@ -1,0 +1,5 @@
+Generate TooBad's classic Minecraft house (no Interior).
+---
+TooBad's classic Minecraft house with its recognizable exterior design and no interior.
+---
+A small Minecraft house inspired by the classic house featured in TooBad's videos, with the recognizable exterior, but no interior.

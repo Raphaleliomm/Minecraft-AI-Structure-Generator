@@ -1,0 +1,5 @@
+Can you generate a three-story medieval Minecraft house featuring a stone-textured ground floor, a warm wooden upper section with a prominent balcony, and a massive, steeply pitched A-frame roof made of dark slate?
+---
+A grand Minecraft town house showcasing a clear vertical three-part layout, textured with a heavy cobblestone foundation, detailed oak and spruce wood planks for the main body, and capped with a stark, triangular stone brick roof.
+---
+Generate a three story simple medium sized house. With simple texturing and a stone brick roof.
