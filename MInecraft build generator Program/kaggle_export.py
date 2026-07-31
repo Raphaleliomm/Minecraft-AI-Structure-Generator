@@ -20,6 +20,9 @@ def create_kaggle_export(
     grid_size: Tuple[int, int, int] = (16, 16, 16),
     model_type: str = "transformer",
     data_dirs: Optional[List[str]] = None,
+    architecture: Optional[dict] = None,
+    tf_unet_config: Optional[dict] = None,
+    air_weight: float = 75.0,
 ) -> Path:
     """Create a complete Kaggle export package.
 
@@ -40,9 +43,15 @@ def create_kaggle_export(
     grid_size : tuple[int, int, int]
         Target grid size (e.g. (16,16,16)).
     model_type : str
-        Model type — only "transformer" is currently supported.
+        Model type — "transformer", "diffusion", or "transformer_diffusion".
     data_dirs : list[str] | None
         List of training data directories to include.
+    architecture : dict | None
+        Architecture dict for transformer (d_model, nhead, num_layers, dim_feedforward).
+    tf_unet_config : dict | None
+        UNet config for transformer_diffusion (channels, channel_multipliers, d_model, cross_attn_heads).
+    air_weight : float
+        Air weight factor for loss weighting (default: 75.0).
 
     Returns
     -------
@@ -76,10 +85,14 @@ def create_kaggle_export(
         allow_vertical=allow_vertical,
         grid_size=(gx, gy, gz),
         model_type=model_type,
+        architecture=architecture,
+        tf_unet_config=tf_unet_config,
+        air_weight=air_weight,
     )
 
     # ─── 4. Create README ───
-    _create_readme(export_dir, epochs, batch_size, learning_rate, grid_size)
+    _create_readme(export_dir, epochs, batch_size, learning_rate, grid_size,
+                   model_type, architecture, tf_unet_config, air_weight)
 
     return export_dir
 
@@ -137,10 +150,57 @@ def _create_notebook(
     allow_vertical: bool,
     grid_size: Tuple[int, int, int],
     model_type: str,
+    architecture: Optional[dict] = None,
+    tf_unet_config: Optional[dict] = None,
+    air_weight: float = 75.0,
 ) -> None:
     """Create a Kaggle-compatible Jupyter notebook that runs training."""
     gx, gy, gz = grid_size
     allow_vertical_flag = "true" if allow_vertical else "false"
+
+    # Determine architecture based on model type
+    if model_type == "transformer":
+        if architecture:
+            d_model = architecture.get("d_model", 192)
+            nhead = architecture.get("nhead", 6)
+            num_layers = architecture.get("num_layers", 5)
+            dim_ff = architecture.get("dim_feedforward", 768)
+        else:
+            d_model, nhead, num_layers, dim_ff = 192, 6, 5, 768
+    elif model_type == "diffusion":
+        d_model, nhead, num_layers, dim_ff = 128, 0, 0, 0  # Not used for diffusion
+    elif model_type == "transformer_diffusion":
+        if tf_unet_config:
+            channels = tf_unet_config.get("channels", 32)
+            ch_mult = tf_unet_config.get("channel_multipliers", (1, 2, 2))
+            tf_d_model = tf_unet_config.get("d_model", 64)
+            ca_heads = tf_unet_config.get("cross_attn_heads", 4)
+        else:
+            channels, ch_mult, tf_d_model, ca_heads = 32, (1, 2, 2), 64, 4
+    else:
+        d_model, nhead, num_layers, dim_ff = 192, 6, 5, 768
+
+    # Build model creation code based on type
+    if model_type == "transformer":
+        model_code = _build_transformer_model_code(d_model, nhead, num_layers, dim_ff)
+        train_code = _build_transformer_train_code(air_weight)
+        save_code = _build_transformer_save_code(d_model, nhead, num_layers, dim_ff)
+        model_desc = "Shared-Weight Voxel Transformer"
+    elif model_type == "diffusion":
+        model_code = _build_diffusion_model_code()
+        train_code = _build_diffusion_train_code(air_weight)
+        save_code = _build_diffusion_save_code()
+        model_desc = "3D Voxel Diffusion Model"
+    elif model_type == "transformer_diffusion":
+        model_code = _build_tf_diffusion_model_code(channels, ch_mult, tf_d_model, ca_heads)
+        train_code = _build_tf_diffusion_train_code(air_weight)
+        save_code = _build_tf_diffusion_save_code(channels, ch_mult, tf_d_model, ca_heads)
+        model_desc = "Transformer Diffusion Model"
+    else:
+        model_code = _build_transformer_model_code(192, 6, 5, 768)
+        train_code = _build_transformer_train_code(air_weight)
+        save_code = _build_transformer_save_code(192, 6, 5, 768)
+        model_desc = "Shared-Weight Voxel Transformer"
 
     notebook = {
         "cells": [
@@ -149,8 +209,9 @@ def _create_notebook(
                 f"**Settings:** Grid {gx}×{gy}×{gz}  ·  "
                 f"{epochs} epochs  ·  batch {batch_size}  ·  "
                 f"lr {learning_rate:.2e}\n\n"
-                "This notebook trains the **Shared-Weight Voxel Transformer** "
-                "using the packaged training data.\n\n"
+                f"This notebook trains the **{model_desc}** "
+                f"using the packaged training data.\n\n"
+                f"**Air Weight:** {air_weight}\n\n"
                 "---"
             ),
             _code_cell(
@@ -189,8 +250,10 @@ def _create_notebook(
                 "# 🧠 Import model & dataset\n"
                 "sys.path.insert(0, '.')\n"
                 "from dataset import MultiSourceSchematicDataset, PromptTokenizer, VoxelTokenizer\n"
-                "from model import SharedWeightVoxelTransformer\n"
-                "from torch.utils.data import DataLoader\n\n"
+                + (f"from model import SharedWeightVoxelTransformer\n" if model_type == "transformer" else "")
+                + (f"from app.diffusion_model import VoxelDiffusionModel, train_diffusion_step\n" if model_type == "diffusion" else "")
+                + (f"from app.diffusion_model import TransformerDiffusionModel, train_transformer_diffusion_step\n" if model_type == "transformer_diffusion" else "")
+                + "from torch.utils.data import DataLoader\n\n"
                 "print('✅ Modules imported')"
             ),
             _code_cell(
@@ -200,7 +263,8 @@ def _create_notebook(
                 f"BATCH_SIZE = {batch_size}\n"
                 f"LR = {learning_rate}\n"
                 f"AUG_DIVERSITY = {aug_diversity}\n"
-                f"ALLOW_VERTICAL = {allow_vertical_flag}\n\n"
+                f"ALLOW_VERTICAL = {allow_vertical_flag}\n"
+                f"AIR_WEIGHT = {air_weight}\n\n"
                 "DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')\n"
                 "print(f'🚀 Device: {DEVICE}')\n"
                 "if torch.cuda.is_available():\n"
@@ -217,6 +281,7 @@ def _create_notebook(
                 "    max_voxels=400_000,\n"
                 "    augmentation_diversity=AUG_DIVERSITY,\n"
                 "    allow_vertical_movement=ALLOW_VERTICAL,\n"
+                "    air_weight_factor=AIR_WEIGHT,\n"
                 ")\n\n"
                 "print(f'📊 Dataset size: {len(dataset)}')\n"
                 "print(f'🧱 Block vocab: {len(dataset.voxel_tokenizer.id_to_block)}')\n"
@@ -226,81 +291,8 @@ def _create_notebook(
                 "    num_workers=2, pin_memory=(DEVICE.type == 'cuda'),\n"
                 ")"
             ),
-            _code_cell(
-                "# 🏗️ Create model\n"
-                "model = SharedWeightVoxelTransformer(\n"
-                "    text_vocab_size=len(dataset.prompt_tokenizer.token_to_id),\n"
-                "    block_vocab_size=len(dataset.voxel_tokenizer.id_to_block),\n"
-                "    grid_size=GRID_SIZE,\n"
-                "    d_model=192,\n"
-                "    nhead=6,\n"
-                "    num_layers=5,\n"
-                "    dim_feedforward=768,\n"
-                "    dropout=0.1,\n"
-                ").to(DEVICE)\n\n"
-                "total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)\n"
-                "print(f'🧠 Trainable parameters: {total_params:,} ({total_params/1e6:.2f}M)')\n\n"
-                "optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)\n\n"
-                "# Cosine LR scheduler with warmup\n"
-                "total_steps = EPOCHS * len(loader)\n"
-                "warmup_steps = 500\n\n"
-                "def lr_lambda(step):\n"
-                "    if step < warmup_steps:\n"
-                "        return float(step) / max(1, warmup_steps)\n"
-                "    progress = float(step - warmup_steps) / max(1, total_steps - warmup_steps)\n"
-                "    return 0.5 * (1.0 + math.cos(progress * math.pi))\n\n"
-                "scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)"
-            ),
-            _code_cell(
-                "# 🎯 Training Loop\n"
-                "best_loss = float('inf')\n"
-                "loss_history = []\n"
-                "start_time = time.time()\n\n"
-                "for epoch in range(1, EPOCHS + 1):\n"
-                "    model.train()\n"
-                "    total_loss = 0.0\n"
-                "    num_batches = 0\n\n"
-                "    for batch in loader:\n"
-                "        prompt_ids = batch['prompt_ids'].to(DEVICE, non_blocking=True)\n"
-                "        target = batch['voxel_ids'].to(DEVICE, non_blocking=True).reshape(prompt_ids.shape[0], -1)\n"
-                "        target = model.safe_clamp_target(target)\n\n"
-                "        logits = model(prompt_ids)\n"
-                "        target_flat = target.reshape(-1)\n"
-                "        sample_weight = batch['sample_weight'].to(DEVICE).view(-1, 1)\n"
-                "        sample_weight = sample_weight.expand_as(target).reshape(-1)\n"
-                "        weight_per_token = torch.where(target_flat == 0, 0.5, 1.0) * sample_weight\n"
-                "        logp = torch.log_softmax(logits.reshape(-1, logits.shape[-1]), dim=-1)\n"
-                "        nll = torch.nn.functional.nll_loss(logp, target_flat, reduction='none')\n"
-                "        loss = (nll * weight_per_token).sum() / weight_per_token.sum().clamp_min(1.0)\n\n"
-                "        optimizer.zero_grad(set_to_none=True)\n"
-                "        loss.backward()\n"
-                "        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)\n"
-                "        optimizer.step()\n"
-                "        scheduler.step()\n\n"
-                "        total_loss += float(loss.detach())\n"
-                "        num_batches += 1\n\n"
-                "    avg_loss = total_loss / max(num_batches, 1)\n"
-                "    loss_history.append(avg_loss)\n"
-                "    elapsed = time.time() - start_time\n\n"
-                "    print(f'epoch={epoch:3d}/{EPOCHS}  loss={avg_loss:.4f}  lr={scheduler.get_last_lr()[0]:.2e}  time={elapsed:.0f}s')\n\n"
-                "    if avg_loss < best_loss:\n"
-                "        best_loss = avg_loss\n"
-                "        torch.save({\n"
-                "            'model_state': model.state_dict(),\n"
-                "            'grid_size': GRID_SIZE,\n"
-                "            'text_vocab_size': len(dataset.prompt_tokenizer.token_to_id),\n"
-                "            'block_vocab_size': len(dataset.voxel_tokenizer.id_to_block),\n"
-                "            'd_model': 192,\n"
-                "            'nhead': 6,\n"
-                "            'layers': 5,\n"
-                "            'dim_feedforward': 768,\n"
-                "            'augmentation_diversity': AUG_DIVERSITY,\n"
-                "            'allow_vertical_movement': ALLOW_VERTICAL,\n"
-                "            'epoch': epoch,\n"
-                "            'loss': avg_loss,\n"
-                "        }, 'model.pt')\n"
-                "        print(f'  → new best model saved (loss={avg_loss:.4f})')"
-            ),
+            _code_cell(model_code),
+            _code_cell(train_code),
             _code_cell(
                 "# ✅ Training complete\n"
                 "elapsed = time.time() - start_time\n"
@@ -332,15 +324,265 @@ def _create_notebook(
     print(f"  📓 Notebook created: {notebook_path}")
 
 
+def _build_transformer_model_code(d_model, nhead, num_layers, dim_ff):
+    return (
+        "# 🏗️ Create model\n"
+        "model = SharedWeightVoxelTransformer(\n"
+        "    text_vocab_size=len(dataset.prompt_tokenizer.token_to_id),\n"
+        "    block_vocab_size=len(dataset.voxel_tokenizer.id_to_block),\n"
+        "    grid_size=GRID_SIZE,\n"
+        f"    d_model={d_model},\n"
+        f"    nhead={nhead},\n"
+        f"    num_layers={num_layers},\n"
+        f"    dim_feedforward={dim_ff},\n"
+        "    dropout=0.1,\n"
+        ").to(DEVICE)\n\n"
+        "total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)\n"
+        "print(f'🧠 Trainable parameters: {total_params:,} ({total_params/1e6:.2f}M)')\n\n"
+        "optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)\n\n"
+        "# Cosine LR scheduler with warmup\n"
+        "total_steps = EPOCHS * len(loader)\n"
+        "warmup_steps = 500\n\n"
+        "def lr_lambda(step):\n"
+        "    if step < warmup_steps:\n"
+        "        return float(step) / max(1, warmup_steps)\n"
+        "    progress = float(step - warmup_steps) / max(1, total_steps - warmup_steps)\n"
+        "    return 0.5 * (1.0 + math.cos(progress * math.pi))\n\n"
+        "scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)"
+    )
+
+
+def _build_transformer_train_code(air_weight):
+    return (
+        "# 🎯 Training Loop\n"
+        "best_loss = float('inf')\n"
+        "loss_history = []\n"
+        "start_time = time.time()\n\n"
+        "for epoch in range(1, EPOCHS + 1):\n"
+        "    model.train()\n"
+        "    total_loss = 0.0\n"
+        "    num_batches = 0\n\n"
+        "    for batch in loader:\n"
+        "        prompt_ids = batch['prompt_ids'].to(DEVICE, non_blocking=True)\n"
+        "        target = batch['voxel_ids'].to(DEVICE, non_blocking=True).reshape(prompt_ids.shape[0], -1)\n"
+        "        target = model.safe_clamp_target(target)\n\n"
+        "        logits = model(prompt_ids)\n"
+        "        target_flat = target.reshape(-1)\n"
+        "        sample_weight = batch['sample_weight'].to(DEVICE).view(-1, 1)\n"
+        "        sample_weight = sample_weight.expand_as(target).reshape(-1)\n"
+        "        per_block_w = batch['per_block_weight'].to(DEVICE).view(-1, 1).expand_as(target).reshape(-1)\n"
+        "        per_air_w = batch['per_air_weight'].to(DEVICE).view(-1, 1).expand_as(target).reshape(-1)\n"
+        "        weight_per_token = torch.where(target_flat == 0, per_air_w, per_block_w) * sample_weight\n"
+        "        logp = torch.log_softmax(logits.reshape(-1, logits.shape[-1]), dim=-1)\n"
+        "        nll = torch.nn.functional.nll_loss(logp, target_flat, reduction='none')\n"
+        "        loss = (nll * weight_per_token).sum() / weight_per_token.sum().clamp_min(1.0)\n\n"
+        "        optimizer.zero_grad(set_to_none=True)\n"
+        "        loss.backward()\n"
+        "        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)\n"
+        "        optimizer.step()\n"
+        "        scheduler.step()\n\n"
+        "        total_loss += float(loss.detach())\n"
+        "        num_batches += 1\n\n"
+        "    avg_loss = total_loss / max(num_batches, 1)\n"
+        "    loss_history.append(avg_loss)\n"
+        "    elapsed = time.time() - start_time\n\n"
+        "    print(f'epoch={epoch:3d}/{EPOCHS}  loss={avg_loss:.4f}  lr={scheduler.get_last_lr()[0]:.2e}  time={elapsed:.0f}s')\n\n"
+        "    if avg_loss < best_loss:\n"
+        "        best_loss = avg_loss\n"
+        "        torch.save({\n"
+        "            'model_state': model.state_dict(),\n"
+        "            'grid_size': GRID_SIZE,\n"
+        "            'text_vocab_size': len(dataset.prompt_tokenizer.token_to_id),\n"
+        "            'block_vocab_size': len(dataset.voxel_tokenizer.id_to_block),\n"
+        f"            'd_model': {d_model},\n"
+        f"            'nhead': {nhead},\n"
+        f"            'layers': {num_layers},\n"
+        f"            'dim_feedforward': {dim_ff},\n"
+        "            'augmentation_diversity': AUG_DIVERSITY,\n"
+        "            'allow_vertical_movement': ALLOW_VERTICAL,\n"
+        "            'epoch': epoch,\n"
+        "            'loss': avg_loss,\n"
+        "        }, 'model.pt')\n"
+        "        print(f'  → new best model saved (loss={avg_loss:.4f})')"
+    ).replace("{d_model}", str(d_model)).replace("{nhead}", str(nhead)).replace("{num_layers}", str(num_layers)).replace("{dim_ff}", str(dim_ff))
+
+
+def _build_transformer_save_code(d_model, nhead, num_layers, dim_ff):
+    return ""  # Save is handled in train code
+
+
+def _build_diffusion_model_code():
+    return (
+        "# 🏗️ Create model\n"
+        "from app.diffusion_model import VoxelDiffusionModel, train_diffusion_step\n"
+        "model = VoxelDiffusionModel(\n"
+        "    num_blocks=len(dataset.voxel_tokenizer.id_to_block),\n"
+        "    text_vocab_size=len(dataset.prompt_tokenizer.token_to_id),\n"
+        "    grid_size=GRID_SIZE,\n"
+        "    d_model=128, d_text=64, channels=64,\n"
+        "    channel_multipliers=(1, 2, 2), num_timesteps=50,\n"
+        ").to(DEVICE)\n\n"
+        "total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)\n"
+        "print(f'🧠 Trainable parameters: {total_params:,} ({total_params/1e6:.2f}M)')\n\n"
+        "optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)"
+    )
+
+
+def _build_diffusion_train_code(air_weight):
+    return (
+        "# 🎯 Training Loop\n"
+        "best_loss = float('inf')\n"
+        "loss_history = []\n"
+        "start_time = time.time()\n\n"
+        "for epoch in range(1, EPOCHS + 1):\n"
+        "    model.train()\n"
+        "    total_loss = 0.0\n"
+        "    num_batches = 0\n\n"
+        "    for batch in loader:\n"
+        "        loss = train_diffusion_step(model, batch, optimizer, DEVICE)\n"
+        "        total_loss += loss\n"
+        "        num_batches += 1\n\n"
+        "    avg_loss = total_loss / max(num_batches, 1)\n"
+        "    loss_history.append(avg_loss)\n"
+        "    elapsed = time.time() - start_time\n\n"
+        "    print(f'epoch={epoch:3d}/{EPOCHS}  loss={avg_loss:.4f}  time={elapsed:.0f}s')\n\n"
+        "    if avg_loss < best_loss:\n"
+        "        best_loss = avg_loss\n"
+        "        torch.save({\n"
+        "            'model_state': model.state_dict(),\n"
+        "            'grid_size': model.grid_size,\n"
+        "            'text_vocab_size': len(dataset.prompt_tokenizer.token_to_id),\n"
+        "            'block_vocab_size': model.num_blocks,\n"
+        "            'd_model': model.d_model, 'd_text': model.d_text, 'channels': model.channels,\n"
+        "            'channel_multipliers': [int(m) for m in model.channel_multipliers],\n"
+        "            'num_timesteps': model.num_timesteps,\n"
+        "            'epoch': epoch,\n"
+        "            'loss': avg_loss,\n"
+        "        }, 'model.pt')\n"
+        "        print(f'  → new best model saved (loss={avg_loss:.4f})')"
+    )
+
+
+def _build_diffusion_save_code():
+    return ""
+
+
+def _build_tf_diffusion_model_code(channels, ch_mult, d_model, ca_heads):
+    ch_mult_str = ", ".join(str(m) for m in ch_mult)
+    return (
+        "# 🏗️ Create model\n"
+        "from app.diffusion_model import TransformerDiffusionModel, train_transformer_diffusion_step\n"
+        "model = TransformerDiffusionModel(\n"
+        "    num_blocks=len(dataset.voxel_tokenizer.id_to_block),\n"
+        "    grid_size=GRID_SIZE,\n"
+        f"    d_model={d_model},\n"
+        f"    channels={channels},\n"
+        f"    channel_multipliers=({ch_mult_str}),\n"
+        "    num_timesteps=50,\n"
+        "    context_dim=768,  # Phi-3.5 hidden dim\n"
+        f"    cross_attn_heads={ca_heads},\n"
+        f"    context_proj_dim={d_model * 2},\n"
+        ").to(DEVICE)\n\n"
+        "total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)\n"
+        "print(f'🧠 Trainable parameters: {total_params:,} ({total_params/1e6:.2f}M)')\n\n"
+        "optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)\n\n"
+        "# Load frozen text encoder\n"
+        "from transformers import AutoModelForCausalLM, AutoTokenizer\n"
+        "encoder_name = 'microsoft/Phi-3.5-mini-instruct'\n"
+        "tokenizer = AutoTokenizer.from_pretrained(encoder_name, use_fast=True, padding_side='right')\n"
+        "if tokenizer.pad_token is None:\n"
+        "    tokenizer.pad_token = tokenizer.eos_token or '<pad>'\n"
+        "encoder = AutoModelForCausalLM.from_pretrained(encoder_name, torch_dtype=torch.float16, low_cpu_mem_usage=True)\n"
+        "encoder = encoder.to(DEVICE)\n"
+        "encoder.eval()\n"
+        "for param in encoder.parameters():\n"
+        "    param.requires_grad = False\n"
+        "print(f'✅ Encoder loaded: {encoder_name}')"
+    )
+
+
+def _build_tf_diffusion_train_code(air_weight):
+    return (
+        "# 🎯 Training Loop\n"
+        "best_loss = float('inf')\n"
+        "loss_history = []\n"
+        "start_time = time.time()\n\n"
+        "for epoch in range(1, EPOCHS + 1):\n"
+        "    model.train()\n"
+        "    total_loss = 0.0\n"
+        "    num_batches = 0\n\n"
+        "    for batch in loader:\n"
+        "        prompts = batch.get('prompt_text', None)\n"
+        "        with torch.no_grad():\n"
+        "            encoded = tokenizer(prompts, return_tensors='pt', padding=True, truncation=True, max_length=512)\n"
+        "            input_ids = encoded['input_ids'].to(DEVICE)\n"
+        "            attention_mask = encoded['attention_mask'].to(DEVICE)\n"
+        "            outputs = encoder(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)\n"
+        "            context = outputs.hidden_states[-1].to(dtype=next(model.parameters()).dtype)\n"
+        "        loss = train_transformer_diffusion_step(model, batch, type('FakeEncoder', (), {'__call__': lambda self, x: {'last_hidden_state': context, 'attention_mask': attention_mask}})(), optimizer, DEVICE)\n"
+        "        total_loss += loss\n"
+        "        num_batches += 1\n\n"
+        "    avg_loss = total_loss / max(num_batches, 1)\n"
+        "    loss_history.append(avg_loss)\n"
+        "    elapsed = time.time() - start_time\n\n"
+        "    print(f'epoch={epoch:3d}/{EPOCHS}  loss={avg_loss:.4f}  time={elapsed:.0f}s')\n\n"
+        "    if avg_loss < best_loss:\n"
+        "        best_loss = avg_loss\n"
+        "        torch.save({\n"
+        "            'model_state': model.state_dict(),\n"
+        "            'grid_size': GRID_SIZE,\n"
+        "            'block_vocab_size': model.num_blocks,\n"
+        "            'num_blocks': model.num_blocks,\n"
+        "            'd_model': model.d_model,\n"
+        "            'channels': model.channels,\n"
+        "            'channel_multipliers': [int(m) for m in model.channel_multipliers],\n"
+        "            'num_timesteps': model.num_timesteps,\n"
+        "            'context_dim': model.context_dim,\n"
+        "            'cross_attn_heads': model.cross_attn_heads,\n"
+        "            'context_proj_dim': model.effective_context_dim,\n"
+        "            'epoch': epoch,\n"
+        "            'loss': avg_loss,\n"
+        "        }, 'model.pt')\n"
+        "        print(f'  → new best model saved (loss={avg_loss:.4f})')"
+    )
+
+
+def _build_tf_diffusion_save_code(channels, ch_mult, d_model, ca_heads):
+    return ""
+
+
 def _create_readme(
     export_dir: Path,
     epochs: int,
     batch_size: int,
     learning_rate: float,
     grid_size: Tuple[int, int, int],
+    model_type: str = "transformer",
+    architecture: Optional[dict] = None,
+    tf_unet_config: Optional[dict] = None,
+    air_weight: float = 75.0,
 ) -> None:
     """Create a README explaining how to use the Kaggle export."""
     gx, gy, gz = grid_size
+
+    # Build architecture description
+    if model_type == "transformer" and architecture:
+        arch_str = f"d_model={architecture.get('d_model', 192)}, nhead={architecture.get('nhead', 6)}, layers={architecture.get('num_layers', 5)}, FFN={architecture.get('dim_feedforward', 768)}"
+    elif model_type == "diffusion":
+        arch_str = "d_model=128, d_text=64, channels=64, (1,2,2)"
+    elif model_type == "transformer_diffusion" and tf_unet_config:
+        ch_mult = tf_unet_config.get("channel_multipliers", (1, 2, 2))
+        ch_mult_str = ", ".join(str(m) for m in ch_mult)
+        arch_str = f"channels={tf_unet_config.get('channels', 32)}, ch_mult=({ch_mult_str}), d_model={tf_unet_config.get('d_model', 64)}, heads={tf_unet_config.get('cross_attn_heads', 4)}"
+    else:
+        arch_str = "d_model=192, nhead=6, layers=5, FFN=768"
+
+    model_desc = {
+        "transformer": "Shared-Weight Voxel Transformer",
+        "diffusion": "3D Voxel Diffusion Model",
+        "transformer_diffusion": "Transformer Diffusion Model",
+    }.get(model_type, "Transformer")
+
     readme = f"""# Minecraft Structure Generator — Kaggle Export
 
 ## 📁 Contents
@@ -384,13 +626,15 @@ def _create_readme(
 | Epochs | {epochs} |
 | Batch Size | {batch_size} |
 | Learning Rate | {learning_rate:.2e} |
-| Architecture | d_model=192, nhead=6, layers=5, FFN=768 |
+| Model Type | {model_desc} |
+| Architecture | {arch_str} |
+| Air Weight | {air_weight} |
 
 ## 📝 Notes
 
 - Training typically takes **2-8 hours** on 2× T4 GPUs depending on dataset size.
-- The notebook uses cosine LR scheduling with 500-step warmup.
-- Loss weighting: air tokens count 0.5×, solid blocks 1.0×.
+- The notebook uses cosine LR scheduling with 500-step warmup (transformer only).
+- Loss weighting uses adaptive per-structure weights with air_weight={air_weight}.
 - If you want to train a different architecture, edit the model creation cell.
 """
     readme_path = export_dir / "README.md"
@@ -437,4 +681,4 @@ if __name__ == "__main__":
         grid_size=(16, 16, 16),
         model_type="transformer",
     )
-    print(f"\\n✅ Export created at: {path}")
+    print(f"\n✅ Export created at: {path}")

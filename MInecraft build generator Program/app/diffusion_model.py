@@ -238,7 +238,7 @@ class VoxelDiffusionModel(nn.Module):
         B = text_ids.shape[0]
         steps = num_steps or self.num_timesteps
         GX, GY, GZ = self.grid_size
-        x = torch.randint(0, self.num_blocks, (B, GX, GY, GZ), device=device)
+        x = torch.zeros((B, GX, GY, GZ), dtype=torch.long, device=device)
         for t in range(steps - 1, -1, -1):
             logits = self.forward(x, torch.full((B,), t, device=device, dtype=torch.long), text_ids)
             if temperature > 0 and temperature != 1.0:
@@ -252,7 +252,7 @@ class VoxelDiffusionModel(nn.Module):
             if t > 0:
                 pred = torch.multinomial(flat_probs, 1).reshape(B, GX, GY, GZ)
                 mask = torch.rand_like(pred.float()) < ((t - 1) / steps)
-                x = torch.where(mask, torch.randint(0, self.num_blocks, pred.shape, device=device), pred)
+                x = torch.where(mask, torch.zeros(pred.shape, dtype=torch.long, device=device), pred)
             else:
                 x = torch.multinomial(flat_probs, 1).reshape(B, GX, GY, GZ)
             x = torch.clamp(x, 0, self.num_blocks - 1)
@@ -381,7 +381,7 @@ class TransformerDiffusionModel(nn.Module):
         B = context.shape[0]
         steps = num_steps or self.num_timesteps
         GX, GY, GZ = self.grid_size
-        x = torch.randint(0, self.num_blocks, (B, GX, GY, GZ), device=device)
+        x = torch.zeros((B, GX, GY, GZ), dtype=torch.long, device=device)
 
         for t in range(steps - 1, -1, -1):
             logits = self.forward(
@@ -401,7 +401,7 @@ class TransformerDiffusionModel(nn.Module):
             if t > 0:
                 pred = torch.multinomial(flat_probs, 1).reshape(B, GX, GY, GZ)
                 mask = torch.rand_like(pred.float()) < ((t - 1) / steps)
-                x = torch.where(mask, torch.randint(0, self.num_blocks, pred.shape, device=device), pred)
+                x = torch.where(mask, torch.zeros(pred.shape, dtype=torch.long, device=device), pred)
             else:
                 x = torch.multinomial(flat_probs, 1).reshape(B, GX, GY, GZ)
             x = torch.clamp(x, 0, self.num_blocks - 1)
@@ -415,7 +415,7 @@ def train_diffusion_step(model, batch, optimizer, device, scaler=None):
     B = clean.shape[0]
     t = torch.randint(0, model.num_timesteps, (B,), device=device)
     noise_mask = torch.rand_like(clean.float()) < (t.float() / model.num_timesteps).view(B, 1, 1, 1)
-    noisy = torch.where(noise_mask, torch.randint(0, model.num_blocks, clean.shape, device=device), clean)
+    noisy = torch.where(noise_mask, torch.zeros(clean.shape, dtype=torch.long, device=device), clean)
     use_amp = scaler is not None
     with torch.amp.autocast(device.type if use_amp else "cpu", enabled=use_amp):
         logits = model(noisy, t, text_ids)
@@ -424,7 +424,15 @@ def train_diffusion_step(model, batch, optimizer, device, scaler=None):
         if isinstance(sample_weight, torch.Tensor) and sample_weight.device != device:
             sample_weight = sample_weight.to(device)
         sample_weight_expanded = sample_weight.view(B, 1, 1, 1).expand_as(clean).reshape(-1)
-        w = torch.where(clean.reshape(-1) == 0, 0.0625, 1.0) * sample_weight_expanded
+        per_block_weight = batch.get("per_block_weight", torch.ones(B, device=device, dtype=torch.float32))
+        per_air_weight = batch.get("per_air_weight", torch.ones(B, device=device, dtype=torch.float32))
+        if isinstance(per_block_weight, torch.Tensor) and per_block_weight.device != device:
+            per_block_weight = per_block_weight.to(device)
+        if isinstance(per_air_weight, torch.Tensor) and per_air_weight.device != device:
+            per_air_weight = per_air_weight.to(device)
+        per_block_w = per_block_weight.view(B, 1, 1, 1).expand_as(clean).reshape(-1)
+        per_air_w = per_air_weight.view(B, 1, 1, 1).expand_as(clean).reshape(-1)
+        w = torch.where(clean.reshape(-1) == 0, per_air_w, per_block_w) * sample_weight_expanded
         loss = (ce * w).sum() / w.sum().clamp_min(1.0)
     optimizer.zero_grad(set_to_none=True)
     if use_amp:
@@ -458,7 +466,7 @@ def train_transformer_diffusion_step(
     B = clean.shape[0]
     t = torch.randint(0, model.num_timesteps, (B,), device=device)
     noise_mask = torch.rand_like(clean.float()) < (t.float() / model.num_timesteps).view(B, 1, 1, 1)
-    noisy = torch.where(noise_mask, torch.randint(0, model.num_blocks, clean.shape, device=device), clean)
+    noisy = torch.where(noise_mask, torch.zeros(clean.shape, dtype=torch.long, device=device), clean)
 
     # Encode prompts with frozen transformer
     prompts = batch.get("prompt_text", None)
@@ -478,7 +486,15 @@ def train_transformer_diffusion_step(
         if isinstance(sample_weight, torch.Tensor) and sample_weight.device != device:
             sample_weight = sample_weight.to(device)
         sample_weight_expanded = sample_weight.view(B, 1, 1, 1).expand_as(clean).reshape(-1)
-        w = torch.where(clean.reshape(-1) == 0, 0.0625, 1.0) * sample_weight_expanded
+        per_block_weight = batch.get("per_block_weight", torch.ones(B, device=device, dtype=torch.float32))
+        per_air_weight = batch.get("per_air_weight", torch.ones(B, device=device, dtype=torch.float32))
+        if isinstance(per_block_weight, torch.Tensor) and per_block_weight.device != device:
+            per_block_weight = per_block_weight.to(device)
+        if isinstance(per_air_weight, torch.Tensor) and per_air_weight.device != device:
+            per_air_weight = per_air_weight.to(device)
+        per_block_w = per_block_weight.view(B, 1, 1, 1).expand_as(clean).reshape(-1)
+        per_air_w = per_air_weight.view(B, 1, 1, 1).expand_as(clean).reshape(-1)
+        w = torch.where(clean.reshape(-1) == 0, per_air_w, per_block_w) * sample_weight_expanded
         loss = (ce * w).sum() / w.sum().clamp_min(1.0)
 
     optimizer.zero_grad(set_to_none=True)
@@ -513,7 +529,7 @@ def train_transformer_diffusion_step_cached(
     B = clean.shape[0]
     t = torch.randint(0, model.num_timesteps, (B,), device=device)
     noise_mask = torch.rand_like(clean.float()) < (t.float() / model.num_timesteps).view(B, 1, 1, 1)
-    noisy = torch.where(noise_mask, torch.randint(0, model.num_blocks, clean.shape, device=device), clean)
+    noisy = torch.where(noise_mask, torch.zeros(clean.shape, dtype=torch.long, device=device), clean)
 
     # Use pre-computed hidden states from batch
     # Cast to model's dtype to avoid Half/Float mismatch
@@ -529,7 +545,15 @@ def train_transformer_diffusion_step_cached(
         if isinstance(sample_weight, torch.Tensor) and sample_weight.device != device:
             sample_weight = sample_weight.to(device)
         sample_weight_expanded = sample_weight.view(B, 1, 1, 1).expand_as(clean).reshape(-1)
-        w = torch.where(clean.reshape(-1) == 0, 0.0625, 1.0) * sample_weight_expanded
+        per_block_weight = batch.get("per_block_weight", torch.ones(B, device=device, dtype=torch.float32))
+        per_air_weight = batch.get("per_air_weight", torch.ones(B, device=device, dtype=torch.float32))
+        if isinstance(per_block_weight, torch.Tensor) and per_block_weight.device != device:
+            per_block_weight = per_block_weight.to(device)
+        if isinstance(per_air_weight, torch.Tensor) and per_air_weight.device != device:
+            per_air_weight = per_air_weight.to(device)
+        per_block_w = per_block_weight.view(B, 1, 1, 1).expand_as(clean).reshape(-1)
+        per_air_w = per_air_weight.view(B, 1, 1, 1).expand_as(clean).reshape(-1)
+        w = torch.where(clean.reshape(-1) == 0, per_air_w, per_block_w) * sample_weight_expanded
         loss = (ce * w).sum() / w.sum().clamp_min(1.0)
 
     optimizer.zero_grad(set_to_none=True)

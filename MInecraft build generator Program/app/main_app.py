@@ -901,22 +901,18 @@ class MinecraftStructureApp(ctk.CTk):
                                                   onvalue=True, offvalue=False)
         self.setting_aug_vertical.grid(row=3, column=0, columnspan=4, sticky="w", pady=(4, 0))
 
-        self.setting_simple_mode = ctk.CTkSwitch(param_grid, text="🔰 Simple Mode (Reduziert die Vielfalt der Blöcke.)",
-                                                 onvalue=True, offvalue=False)
-        self.setting_simple_mode.grid(row=4, column=0, columnspan=4, sticky="w", pady=(4, 0))
-
         # ── Air Weight ──
         ctk.CTkLabel(param_grid, text="🏗️ Luft-Gewicht (50-100):").grid(
-            row=5, column=0, sticky="w", padx=(0, 8), pady=(8, 0))
+            row=4, column=0, sticky="w", padx=(0, 8), pady=(8, 0))
         self.air_weight_var = ctk.DoubleVar(value=75.0)
         self.air_weight_slider = ctk.CTkSlider(param_grid, from_=50, to=100, number_of_steps=50,
                                                variable=self.air_weight_var, command=self._update_air_weight_label)
-        self.air_weight_slider.grid(row=5, column=1, columnspan=2, sticky="ew", pady=(8, 0))
+        self.air_weight_slider.grid(row=4, column=1, columnspan=2, sticky="ew", pady=(8, 0))
         self.air_weight_label = ctk.CTkLabel(param_grid, text="75", width=28)
-        self.air_weight_label.grid(row=5, column=3, sticky="w", pady=(8, 0))
+        self.air_weight_label.grid(row=4, column=3, sticky="w", pady=(8, 0))
         ctk.CTkLabel(param_grid, text="Wir empfehlen die Standard-Einstellung von 75 beizubehalten.",
                      font=("Segoe UI", 9), text_color=("gray50", "gray40")).grid(
-            row=6, column=0, columnspan=4, sticky="w", pady=(0, 4))
+            row=5, column=0, columnspan=4, sticky="w", pady=(0, 4))
 
         # ─── Progress Display ───
         progress_frame = ctk.CTkFrame(scroll, fg_color="transparent")
@@ -1335,6 +1331,7 @@ class MinecraftStructureApp(ctk.CTk):
             grid_size = self._get_selected_grid_size()
             aug_diversity = int(round(float(self.augmentation_diversity_var.get())))
             allow_vertical = bool(self.setting_aug_vertical.get())
+            air_weight = float(self.air_weight_var.get()) if hasattr(self, 'air_weight_var') else 75.0
             device = torch.device("cuda" if torch.cuda.is_available() and self.config.gpu_enabled else "cpu")
             config = self._tf_unet_config
             use_cached = self.tf_use_cached_hs_var.get()
@@ -1359,7 +1356,7 @@ class MinecraftStructureApp(ctk.CTk):
                     self.data_dirs, cache_dir, target_size=grid_size, max_voxels=400_000,
                     augmentation_diversity=aug_diversity,
                     allow_vertical_movement=allow_vertical,
-                    simple_mode=False,
+                    air_weight_factor=air_weight,
                 )
                 from torch.utils.data import DataLoader
                 loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
@@ -1398,7 +1395,7 @@ class MinecraftStructureApp(ctk.CTk):
                     self.data_dirs, target_size=grid_size, max_voxels=400_000,
                     augmentation_diversity=aug_diversity,
                     allow_vertical_movement=allow_vertical,
-                    simple_mode=False,
+                    air_weight_factor=air_weight,
                 )
                 from torch.utils.data import DataLoader
                 loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
@@ -1641,6 +1638,7 @@ class MinecraftStructureApp(ctk.CTk):
         frame = ctk.CTkFrame(tab, corner_radius=10)
         frame.grid(row=0, column=0, sticky="nsew", padx=40, pady=40)
         frame.grid_columnconfigure(0, weight=1)
+        grid_sizes = " · ".join(GRID_SIZE_OPTIONS)
         info = [
             f"🏗️ {APP_NAME} v{VERSION}", "",
             "Ein KI-gestützter Minecraft Struktur Generator", "",
@@ -1651,13 +1649,13 @@ class MinecraftStructureApp(ctk.CTk):
             "     - 3D UNet mit diskreter Denoising Diffusion",
             "  • ⚡ Transformer Modell (Single-Pass)",
             "  • 🌀 3D Diffusion Modell (diskrete Denoising)",
-            "  • 3D Voxel-Vorschau (isometrisch / Draufsicht / Seite)",
+            "  • 3D Voxel-Vorschau (frei drehbar mit Maus, zoombar)",
             "  • Text-zu-Struktur Generierung",
             "  • Modell-Manager (mehrere Versionen, Default, Train More)",
             "  • Projekt-Management mit Speichern & Export",
             "  • GPU-beschleunigtes Training", "",
             f"📊 Trainingsdaten: gut analysierte + augmentierte + gescrapte Strukturen",
-            f"🎯 Grid: 16×16×16 Voxel | 🧱 817+ Blocktypen", "",
+            f"🎯 Verfügbare Grid-Größen: {grid_sizes}", "",
             "Erstellt mit PyTorch, CustomTkinter & viel ❤️",
         ]
         ctk.CTkLabel(frame, text="\n".join(info), font=("Segoe UI", 13), justify="left").grid(row=0, column=0, sticky="w", padx=20, pady=20)
@@ -1841,10 +1839,10 @@ class MinecraftStructureApp(ctk.CTk):
     # ═══════════════════════════════════════════════════════════════
 
     def _update_diffusion_visibility(self):
-        is_diff = self.model_type == "diffusion"
-        self.diff_steps_label.configure(text_color=("gray70", "gray70") if not is_diff else ("white", "white"))
+        is_diff = self.model_type in ("diffusion", "transformer_diffusion")
+        self.diff_steps_label.configure(text_color=("white", "white") if is_diff else ("gray70", "gray70"))
         self.diff_steps_slider.configure(state="normal" if is_diff else "disabled")
-        self.diff_steps_value.configure(text_color=("gray70", "gray70") if not is_diff else ("white", "white"))
+        self.diff_steps_value.configure(text_color=("white", "white") if is_diff else ("gray70", "gray70"))
 
     def _generate_structure(self):
         if self.generation_running:
@@ -2322,7 +2320,6 @@ class MinecraftStructureApp(ctk.CTk):
         grid_size = self._get_selected_grid_size()
         augmentation_diversity = int(round(float(self.augmentation_diversity_var.get())))
         allow_vertical_movement = bool(self.setting_aug_vertical.get())
-        simple_mode = bool(self.setting_simple_mode.get())
         gs_label = f"{grid_size[0]}x{grid_size[1]}x{grid_size[2]}"
         self.training_running = True
         self.train_epoch_bar.set(0)
@@ -2334,11 +2331,11 @@ class MinecraftStructureApp(ctk.CTk):
         self.train_stop_btn.configure(state="normal")
         self._current_training_type = model_type
         threading.Thread(target=self._training_worker,
-                         args=(model_type, grid_size, augmentation_diversity, allow_vertical_movement, simple_mode),
+                         args=(model_type, grid_size, augmentation_diversity, allow_vertical_movement),
                          daemon=True).start()
 
     def _training_worker(self, model_type: str, grid_size: tuple[int, int, int],
-                         augmentation_diversity: int, allow_vertical_movement: bool, simple_mode: bool = False):
+                         augmentation_diversity: int, allow_vertical_movement: bool):
         try:
             epochs = int(self.train_epochs_entry.get())
             batch_size = int(self.train_batch_entry.get())
@@ -2365,14 +2362,14 @@ class MinecraftStructureApp(ctk.CTk):
                 if pt_path.exists():
                     orig_pt = PromptTokenizer.load(pt_path)
 
-            air_weight = float(self.air_weight_var.get()) if hasattr(self, 'air_weight_var') else 100.0
+            air_weight = float(self.air_weight_var.get()) if hasattr(self, 'air_weight_var') else 75.0
 
             from dataset import MultiSourceSchematicDataset
             dataset = MultiSourceSchematicDataset(
                 self.data_dirs, target_size=grid_size, max_voxels=400_000,
                 augmentation_diversity=augmentation_diversity,
                 allow_vertical_movement=allow_vertical_movement,
-                simple_mode=simple_mode, prompt_tokenizer=orig_pt, voxel_tokenizer=orig_vt,
+                prompt_tokenizer=orig_pt, voxel_tokenizer=orig_vt,
                 air_weight_factor=air_weight,
             )
             from torch.utils.data import DataLoader
@@ -2546,11 +2543,24 @@ class MinecraftStructureApp(ctk.CTk):
             aug_diversity = int(round(float(self.augmentation_diversity_var.get())))
             allow_vertical = bool(self.setting_aug_vertical.get())
             grid_size = self._get_selected_grid_size()
+            air_weight = float(self.air_weight_var.get()) if hasattr(self, 'air_weight_var') else 75.0
+            # Use the selected model type from the training tab
+            train_type = self.train_model_type_selector.get()
+            model_type = {"Transformer": "transformer", "Diffusion": "diffusion",
+                          "TF-Diffusion": "transformer_diffusion"}.get(train_type, "transformer")
+            # Get the selected architecture (for transformer) or UNet config (for TF-Diffusion)
+            arch = getattr(self, '_selected_arch', None)
+            if arch is None and model_type == "transformer":
+                self._on_size_slider(self.size_slider_var.get())
+                arch = getattr(self, '_selected_arch', None)
+            tf_unet_config = getattr(self, '_tf_unet_config', None)
             from kaggle_export import create_kaggle_export
             export_path = create_kaggle_export(output_dir="exports", epochs=epochs, batch_size=batch_size,
                                                learning_rate=lr, aug_diversity=aug_diversity,
                                                allow_vertical=allow_vertical, grid_size=grid_size,
-                                               model_type="transformer", data_dirs=self.data_dirs)
+                                               model_type=model_type, data_dirs=self.data_dirs,
+                                               architecture=arch, tf_unet_config=tf_unet_config,
+                                               air_weight=air_weight)
             self.after(0, lambda p=export_path: self.status_var.set(f"✅ Kaggle-Export erstellt: {p.name}"))
             self.after(0, lambda p=export_path: showinfo(
                 "Export erfolgreich",

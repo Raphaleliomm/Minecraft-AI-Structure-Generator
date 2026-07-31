@@ -1109,7 +1109,7 @@ class MultiSourceSchematicDataset(Dataset):
                  max_augmented_variants: int | None = 512,
                  simple_mode: bool = False,
                  structure_block_weight: float = 100.0,
-                 air_weight_factor: float = 100.0,
+                 air_weight_factor: float = 75.0,
                  hidden_states: torch.Tensor | None = None,
                  attention_masks: torch.Tensor | None = None,
                  hidden_index: list[int] | None = None):
