@@ -19,6 +19,7 @@ DEFAULT_CONFIG = {
     "temperature": 0.85,
     "top_k": 40,
     "diffusion_steps": 50,
+    "noise_block_prob": 0.20,
     "export_directory": "exports",
     "projects_directory": "projects",
     "language": "de",
@@ -37,6 +38,7 @@ class AppConfig:
     temperature: float = 0.85
     top_k: int = 40
     diffusion_steps: int = 50
+    noise_block_prob: float = 0.20
     export_directory: str = "exports"
     projects_directory: str = "projects"
     language: str = "de"

@@ -408,14 +408,66 @@ class TransformerDiffusionModel(nn.Module):
         return x
 
 
-def train_diffusion_step(model, batch, optimizer, device, scaler=None):
+def create_noisy_blocks(
+    clean: torch.Tensor,
+    timesteps: torch.Tensor,
+    num_timesteps: int,
+    num_blocks: int,
+    noise_block_prob: float = 0.20,
+) -> torch.Tensor:
+    """Create noisy blocks for diffusion training.
+
+    Standard noise process: at noise positions (determined by timestep),
+    blocks are set to air (0).
+
+    Block injection (for noise_block_prob fraction of samples): at noise
+    positions, random wrong block IDs are used instead of air. This teaches
+    the model to remove incorrectly placed blocks, which occurs during
+    sampling with temperature or bad predictions.
+
+    Args:
+        clean: [B, GX, GY, GZ] clean block IDs
+        timesteps: [B] diffusion timesteps
+        num_timesteps: total number of timesteps
+        num_blocks: number of block types in vocabulary
+        noise_block_prob: probability of injecting random blocks instead of air
+
+    Returns:
+        noisy: [B, GX, GY, GZ] noisy block IDs
+    """
+    B = clean.shape[0]
+    device = clean.device
+
+    # Standard noise mask: positions where rand < t/num_timesteps are noised
+    noise_mask = torch.rand_like(clean.float()) < (timesteps.float() / num_timesteps).view(B, 1, 1, 1)
+
+    # Determine which samples get random block injection (20% by default).
+    # These samples are "clones" of the intermediate step with wrong blocks
+    # added, so the model learns to remove incorrectly placed blocks.
+    inject_blocks = torch.rand(B, device=device) < noise_block_prob
+
+    # Generate random non-air block IDs for injection (1 to num_blocks-1)
+    random_blocks = torch.randint(1, num_blocks, clean.shape, device=device, dtype=clean.dtype)
+
+    # For injected samples: use random blocks at noise positions
+    # For non-injected samples: use air (0) at noise positions (standard)
+    noise_values = torch.where(
+        inject_blocks.view(B, 1, 1, 1),
+        random_blocks,
+        torch.zeros_like(clean),
+    )
+
+    noisy = torch.where(noise_mask, noise_values, clean)
+    return noisy
+
+
+def train_diffusion_step(model, batch, optimizer, device, scaler=None, noise_block_prob=0.20):
     model.train()
     clean = torch.clamp(batch["voxel_ids"].to(device, non_blocking=True).long(), 0, model.num_blocks - 1)
     text_ids = batch["prompt_ids"].to(device, non_blocking=True)
     B = clean.shape[0]
     t = torch.randint(0, model.num_timesteps, (B,), device=device)
-    noise_mask = torch.rand_like(clean.float()) < (t.float() / model.num_timesteps).view(B, 1, 1, 1)
-    noisy = torch.where(noise_mask, torch.zeros(clean.shape, dtype=torch.long, device=device), clean)
+    noisy = create_noisy_blocks(clean, t, model.num_timesteps, model.num_blocks, noise_block_prob)
     use_amp = scaler is not None
     with torch.amp.autocast(device.type if use_amp else "cpu", enabled=use_amp):
         logits = model(noisy, t, text_ids)
@@ -456,6 +508,7 @@ def train_transformer_diffusion_step(
     optimizer: torch.optim.Optimizer,
     device: torch.device,
     scaler=None,
+    noise_block_prob: float = 0.20,
 ) -> float:
     """Training step for TransformerDiffusionModel.
 
@@ -465,8 +518,7 @@ def train_transformer_diffusion_step(
     clean = torch.clamp(batch["voxel_ids"].to(device, non_blocking=True).long(), 0, model.num_blocks - 1)
     B = clean.shape[0]
     t = torch.randint(0, model.num_timesteps, (B,), device=device)
-    noise_mask = torch.rand_like(clean.float()) < (t.float() / model.num_timesteps).view(B, 1, 1, 1)
-    noisy = torch.where(noise_mask, torch.zeros(clean.shape, dtype=torch.long, device=device), clean)
+    noisy = create_noisy_blocks(clean, t, model.num_timesteps, model.num_blocks, noise_block_prob)
 
     # Encode prompts with frozen transformer
     prompts = batch.get("prompt_text", None)
@@ -518,6 +570,7 @@ def train_transformer_diffusion_step_cached(
     optimizer: torch.optim.Optimizer,
     device: torch.device,
     scaler=None,
+    noise_block_prob: float = 0.20,
 ) -> float:
     """Training step for TransformerDiffusionModel using pre-computed hidden states.
     
@@ -528,8 +581,7 @@ def train_transformer_diffusion_step_cached(
     clean = torch.clamp(batch["voxel_ids"].to(device, non_blocking=True).long(), 0, model.num_blocks - 1)
     B = clean.shape[0]
     t = torch.randint(0, model.num_timesteps, (B,), device=device)
-    noise_mask = torch.rand_like(clean.float()) < (t.float() / model.num_timesteps).view(B, 1, 1, 1)
-    noisy = torch.where(noise_mask, torch.zeros(clean.shape, dtype=torch.long, device=device), clean)
+    noisy = create_noisy_blocks(clean, t, model.num_timesteps, model.num_blocks, noise_block_prob)
 
     # Use pre-computed hidden states from batch
     # Cast to model's dtype to avoid Half/Float mismatch
