@@ -11,11 +11,15 @@ from dataset import MultiSourceSchematicDataset
 from model import SharedWeightVoxelTransformer
 
 
-# Erlaubte Grid-Größen
+# Erlaubte Grid-Größen (mit GUI konsistent)
 ALLOWED_GRID_SIZES = {
     "16": (16, 16, 16),
     "32": (32, 32, 32),
     "48": (48, 48, 48),
+    "64": (64, 64, 64),
+    "96": (96, 96, 96),
+    "128": (128, 128, 128),
+    "256": (256, 256, 256),
 }
 
 
@@ -38,27 +42,24 @@ def main() -> None:
                         help="High-quality manually analyzed directories (get higher weight)")
     parser.add_argument("--priority-weight", type=float, default=5.0,
                         help="Weight multiplier for the priority (good) data dirs (default: 5.0)")
-    parser.add_argument("--max-voxels", type=int, default=100_000)
+    parser.add_argument("--max-voxels", type=int, default=400_000)
     parser.add_argument("--out-dir", default=None,
                         help="Output directory. If not set, auto-selected based on --model-size.")
     parser.add_argument("--model-size", type=str, default="16",
                         choices=list(ALLOWED_GRID_SIZES.keys()),
-                        help="Model/Grid size: 16 = 16x16x16, 32 = 32x32x32, 48 = 48x48x48")
+                        help="Model/Grid size: 16 = 16x16x16, 32 = 32x32x32, 48 = 48x48x48, etc.")
     parser.add_argument("--grid-size", type=parse_size, default=None,
                         help="DEPRECATED: Use --model-size instead. Grid size (16,16,16), (32,32,32) or (48,48,48).")
-    parser.add_argument("--epochs", type=int, default=30)
+    parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=4)
-    parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--alpha", type=float, default=0.3)
-    parser.add_argument("--beta", type=float, default=1.0)
-    parser.add_argument("--d-model", type=int, default=256)
-    parser.add_argument("--nhead", type=int, default=8)
-    parser.add_argument("--layers", type=int, default=6)
-    parser.add_argument("--dim-feedforward", type=int, default=1024)
-    parser.add_argument("--dropout", type=float, default=0.15)
+    parser.add_argument("--lr", type=float, default=1.5e-3)
+    parser.add_argument("--d-model", type=int, default=192)
+    parser.add_argument("--nhead", type=int, default=6)
+    parser.add_argument("--layers", type=int, default=5)
+    parser.add_argument("--dim-feedforward", type=int, default=768)
+    parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--warmup-steps", type=int, default=500)
     parser.add_argument("--grad-clip", type=float, default=1.0)
-    parser.add_argument("--label-smoothing", type=float, default=0.1)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--augmentation-diversity", type=int, default=1,
                         help="How densely each build is shifted/rotated for training. 0 = centered only.")
@@ -142,7 +143,6 @@ def main() -> None:
         lr=args.lr,
         weight_decay=args.weight_decay,
     )
-    criterion = nn.CrossEntropyLoss(label_smoothing=args.label_smoothing)
 
     # Cosine annealing with warmup
     warmup_steps = args.warmup_steps
@@ -160,8 +160,6 @@ def main() -> None:
     for epoch in range(1, args.epochs + 1):
         model.train()
         total_loss = 0.0
-        total_loss_1 = 0.0
-        total_loss_2 = 0.0
         num_batches = 0
 
         for batch in loader:
@@ -170,11 +168,13 @@ def main() -> None:
             target = model.safe_clamp_target(target)
 
             logits = model(prompt_ids)
-            # Gewichtung: Air (0) = 1/16 = 0.0625, echte Blöcke = 1.0
+            # Adaptive per-structure weights (consistent with GUI)
             target_flat = target.reshape(-1)
             sample_weight = batch["sample_weight"].to(device, non_blocking=True).view(-1, 1)
             sample_weight = sample_weight.expand_as(target).reshape(-1)
-            weight_per_token = torch.where(target_flat == 0, 0.0625, 1.0) * sample_weight
+            per_block_w = batch["per_block_weight"].to(device, non_blocking=True).view(-1, 1).expand_as(target).reshape(-1)
+            per_air_w = batch["per_air_weight"].to(device, non_blocking=True).view(-1, 1).expand_as(target).reshape(-1)
+            weight_per_token = torch.where(target_flat == 0, per_air_w, per_block_w) * sample_weight
             logp = torch.log_softmax(logits.reshape(-1, logits.shape[-1]), dim=-1)
             nll = torch.nn.functional.nll_loss(logp, target_flat, reduction='none')
             loss = (nll * weight_per_token).sum() / weight_per_token.sum().clamp_min(1.0)

@@ -23,6 +23,8 @@ def create_kaggle_export(
     architecture: Optional[dict] = None,
     tf_unet_config: Optional[dict] = None,
     air_weight: float = 75.0,
+    encoder_name: Optional[str] = None,
+    context_dim: Optional[int] = None,
 ) -> Path:
     """Create a complete Kaggle export package.
 
@@ -88,6 +90,8 @@ def create_kaggle_export(
         architecture=architecture,
         tf_unet_config=tf_unet_config,
         air_weight=air_weight,
+        encoder_name=encoder_name,
+        context_dim=context_dim,
     )
 
     # ─── 4. Create README ───
@@ -103,7 +107,7 @@ def create_kaggle_export(
 
 
 def _copy_source_files(export_dir: Path) -> None:
-    """Copy train.py, model.py, dataset.py, requirements.txt into the export dir."""
+    """Copy train.py, model.py, dataset.py, requirements.txt, and app/ into the export dir."""
     src_dir = Path(".")
 
     files_to_copy = [
@@ -123,6 +127,12 @@ def _copy_source_files(export_dir: Path) -> None:
                 f"# {fname} — automatically generated placeholder\n"
                 f"# The original was not found at {src.resolve()}\n"
             )
+
+    # Copy the app/ directory (needed for diffusion_model.py, transformer_encoder.py, etc.)
+    app_src = src_dir / "app"
+    app_dst = export_dir / "app"
+    if app_src.exists() and app_src.is_dir():
+        shutil.copytree(str(app_src), str(app_dst), dirs_exist_ok=True)
 
 
 def _package_training_data(export_dir: Path, data_dirs: List[str]) -> None:
@@ -153,6 +163,8 @@ def _create_notebook(
     architecture: Optional[dict] = None,
     tf_unet_config: Optional[dict] = None,
     air_weight: float = 75.0,
+    encoder_name: Optional[str] = None,
+    context_dim: Optional[int] = None,
 ) -> None:
     """Create a Kaggle-compatible Jupyter notebook that runs training."""
     gx, gy, gz = grid_size
@@ -177,6 +189,9 @@ def _create_notebook(
             ca_heads = tf_unet_config.get("cross_attn_heads", 4)
         else:
             channels, ch_mult, tf_d_model, ca_heads = 32, (1, 2, 2), 64, 4
+        # Use provided encoder info or default to Phi-3.5
+        enc_name = encoder_name or "Phi-3.5-mini"
+        ctx_dim = context_dim or 768
     else:
         d_model, nhead, num_layers, dim_ff = 192, 6, 5, 768
 
@@ -192,8 +207,8 @@ def _create_notebook(
         save_code = _build_diffusion_save_code()
         model_desc = "3D Voxel Diffusion Model"
     elif model_type == "transformer_diffusion":
-        model_code = _build_tf_diffusion_model_code(channels, ch_mult, tf_d_model, ca_heads)
-        train_code = _build_tf_diffusion_train_code(air_weight)
+        model_code = _build_tf_diffusion_model_code(channels, ch_mult, tf_d_model, ca_heads, enc_name, ctx_dim)
+        train_code = _build_tf_diffusion_train_code(air_weight, enc_name, ctx_dim)
         save_code = _build_tf_diffusion_save_code(channels, ch_mult, tf_d_model, ca_heads)
         model_desc = "Transformer Diffusion Model"
     else:
@@ -468,8 +483,33 @@ def _build_diffusion_save_code():
     return ""
 
 
-def _build_tf_diffusion_model_code(channels, ch_mult, d_model, ca_heads):
+_ENCODER_HF_IDS = {
+    "Phi-3.5-mini": "microsoft/Phi-3.5-mini-instruct",
+    "Gemma-2-2B": "google/gemma-2-2b",
+    "Gemma-2-9B": "google/gemma-2-9b",
+    "Gemma-2-27B": "google/gemma-2-27b-it",
+    "Gemma-3-1B": "google/gemma-3-1b-it",
+    "Gemma-3-4B": "google/gemma-3-4b-it",
+    "Gemma-3-12B": "google/gemma-3-12b-it",
+    "Gemma-3-27B": "google/gemma-3-27b-it",
+    "Flan-T5-small": "google/flan-t5-small",
+    "Flan-T5-base": "google/flan-t5-base",
+    "Flan-T5-large": "google/flan-t5-large",
+    "Flan-T5-XL": "google/flan-t5-xl",
+    "Flan-T5-XXL": "google/flan-t5-xxl",
+}
+
+
+def _build_tf_diffusion_model_code(channels, ch_mult, d_model, ca_heads, encoder_name="Phi-3.5-mini", context_dim=768):
     ch_mult_str = ", ".join(str(m) for m in ch_mult)
+    hf_id = _ENCODER_HF_IDS.get(encoder_name, "microsoft/Phi-3.5-mini-instruct")
+    is_t5 = "t5" in encoder_name.lower()
+    if is_t5:
+        import_line = "from transformers import T5EncoderModel, AutoTokenizer\n"
+        model_load_line = "encoder = T5EncoderModel.from_pretrained(encoder_name, torch_dtype=torch.float16, low_cpu_mem_usage=True)\n"
+    else:
+        import_line = "from transformers import AutoModelForCausalLM, AutoTokenizer\n"
+        model_load_line = "encoder = AutoModelForCausalLM.from_pretrained(encoder_name, torch_dtype=torch.float16, low_cpu_mem_usage=True)\n"
     return (
         "# 🏗️ Create model\n"
         "from app.diffusion_model import TransformerDiffusionModel, train_transformer_diffusion_step\n"
@@ -480,7 +520,7 @@ def _build_tf_diffusion_model_code(channels, ch_mult, d_model, ca_heads):
         f"    channels={channels},\n"
         f"    channel_multipliers=({ch_mult_str}),\n"
         "    num_timesteps=50,\n"
-        "    context_dim=768,  # Phi-3.5 hidden dim\n"
+        f"    context_dim={context_dim},  # {encoder_name} hidden dim\n"
         f"    cross_attn_heads={ca_heads},\n"
         f"    context_proj_dim={d_model * 2},\n"
         ").to(DEVICE)\n\n"
@@ -488,21 +528,24 @@ def _build_tf_diffusion_model_code(channels, ch_mult, d_model, ca_heads):
         "print(f'🧠 Trainable parameters: {total_params:,} ({total_params/1e6:.2f}M)')\n\n"
         "optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)\n\n"
         "# Load frozen text encoder\n"
-        "from transformers import AutoModelForCausalLM, AutoTokenizer\n"
-        "encoder_name = 'microsoft/Phi-3.5-mini-instruct'\n"
+        + import_line
+        + f"encoder_name = '{hf_id}'\n"
         "tokenizer = AutoTokenizer.from_pretrained(encoder_name, use_fast=True, padding_side='right')\n"
         "if tokenizer.pad_token is None:\n"
         "    tokenizer.pad_token = tokenizer.eos_token or '<pad>'\n"
-        "encoder = AutoModelForCausalLM.from_pretrained(encoder_name, torch_dtype=torch.float16, low_cpu_mem_usage=True)\n"
-        "encoder = encoder.to(DEVICE)\n"
+        + model_load_line
+        + "encoder = encoder.to(DEVICE)\n"
         "encoder.eval()\n"
         "for param in encoder.parameters():\n"
         "    param.requires_grad = False\n"
-        "print(f'✅ Encoder loaded: {encoder_name}')"
+        f"print(f'✅ Encoder loaded: {{encoder_name}}')\n\n"
+        f"ENCODER_DISPLAY_NAME = '{encoder_name}'\n"
+        f"ENCODER_HF_ID = '{hf_id}'\n"
+        f"ENCODER_HIDDEN_DIM = {context_dim}\n"
     )
 
 
-def _build_tf_diffusion_train_code(air_weight):
+def _build_tf_diffusion_train_code(air_weight, encoder_name="Phi-3.5-mini", context_dim=768):
     return (
         "# 🎯 Training Loop\n"
         "best_loss = float('inf')\n"
@@ -540,7 +583,12 @@ def _build_tf_diffusion_train_code(air_weight):
         "            'num_timesteps': model.num_timesteps,\n"
         "            'context_dim': model.context_dim,\n"
         "            'cross_attn_heads': model.cross_attn_heads,\n"
-        "            'context_proj_dim': model.effective_context_dim,\n"
+            "            'context_proj_dim': model.effective_context_dim,\n"
+        "            'encoder_config': {\n"
+        "                'display_name': ENCODER_DISPLAY_NAME,\n"
+        "                'hf_id': ENCODER_HF_ID,\n"
+        "                'hidden_dim': ENCODER_HIDDEN_DIM,\n"
+        "            },\n"
         "            'epoch': epoch,\n"
         "            'loss': avg_loss,\n"
         "        }, 'model.pt')\n"

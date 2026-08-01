@@ -420,7 +420,7 @@ class MinecraftStructureApp(ctk.CTk):
         ctk.CTkButton(orbit_frame, text="SO", font=("Segoe UI", 11), width=50, height=26,
                       command=lambda: self._set_horizontal_orbit(225)).grid(row=0, column=3, padx=2)
         ctk.CTkLabel(orbit_frame, text="🔍", font=("Segoe UI", 12)).grid(row=0, column=4, padx=(8, 2))
-        self.zoom_slider = ctk.CTkSlider(orbit_frame, from_=4, to=12.0, number_of_steps=32, width=80)
+        self.zoom_slider = ctk.CTkSlider(orbit_frame, from_=1.5, to=6.0, number_of_steps=45, width=80)
         self.zoom_slider.grid(row=0, column=5, padx=(0, 4))
         self.zoom_slider.set(self.zoom_scale)
         self.zoom_slider.configure(command=lambda v: self._update_zoom(v))
@@ -645,6 +645,8 @@ class MinecraftStructureApp(ctk.CTk):
                     self.config.default_transformer_name = name
                 elif entry.model_type == "diffusion":
                     self.config.default_diffusion_name = name
+                elif entry.model_type == "transformer_diffusion":
+                    self.config.default_tf_diffusion_name = name
                 self.config.save()
             self._refresh_models_tab()
             self.status_var.set(f"👑 {name} ist jetzt Standard-{entry.model_type.upper()}")
@@ -771,6 +773,8 @@ class MinecraftStructureApp(ctk.CTk):
                         self.config.default_transformer_name = new_name
                     if self.config.default_diffusion_name == old_name:
                         self.config.default_diffusion_name = new_name
+                    if getattr(self.config, 'default_tf_diffusion_name', None) == old_name:
+                        self.config.default_tf_diffusion_name = new_name
                     self.config.save()
                 self._refresh_models_tab()
                 self._refresh_model_combo()
@@ -789,6 +793,8 @@ class MinecraftStructureApp(ctk.CTk):
                 self.config.default_transformer_name = None
             if self.config.default_diffusion_name == name:
                 self.config.default_diffusion_name = None
+            if getattr(self.config, 'default_tf_diffusion_name', None) == name:
+                self.config.default_tf_diffusion_name = None
             self.config.save()
             self._refresh_models_tab()
             self._refresh_model_combo()
@@ -1485,78 +1491,6 @@ class MinecraftStructureApp(ctk.CTk):
             self.after(0, lambda: self.train_btn_tf_diffusion.configure(state="normal"))
             self.after(0, lambda: self.train_stop_btn.configure(state="disabled"))
 
-    def _generate_tf_diffusion(self):
-        if self.generation_running:
-            return
-        if self.tf_encoder is None:
-            self.status_var.set("❌ Bitte zuerst den Text Encoder laden")
-            return
-        if self.tf_diffusion_model is None:
-            self.status_var.set("❌ Kein Transformer Diffusion Modell geladen")
-            return
-        prompt = self.prompt_text.get("1.0", "end-1c").strip()
-        if not prompt:
-            self.status_var.set("❌ Bitte Prompt eingeben")
-            return
-        self.generation_running = True
-        self.tf_generate_btn.configure(state="disabled", text="⏳ Generiere...")
-        self.tf_progress_bar_gen.start()
-        self.status_var.set("⏳ Generiere mit Transformer Diffusion...")
-        threading.Thread(target=self._generate_tf_diffusion_worker, args=(prompt,), daemon=True).start()
-
-    def _generate_tf_diffusion_worker(self, prompt: str):
-        try:
-            device = torch.device("cuda" if torch.cuda.is_available() and self.config.gpu_enabled else "cpu")
-            temp = self.temp_slider.get()
-            topk = int(self.topk_slider.get())
-            num_steps = int(self.diff_steps_slider.get())
-            with torch.no_grad():
-                encoded = self.tf_encoder([prompt])
-                # Cast to model's dtype to avoid Half/Float mismatch
-                model_dtype = next(self.tf_diffusion_model.parameters()).dtype
-                context = encoded["last_hidden_state"].to(device=device, dtype=model_dtype)
-                context_mask = encoded["attention_mask"].to(device=device)
-            grid = self.tf_diffusion_model.sample(context, context_mask, num_steps=num_steps,
-                                                  temperature=temp, top_k=topk)[0].cpu()
-            self.id_to_block = self.voxel_tokenizer.id_to_block
-            gs = grid.shape
-            info = (f"✅ Transformer Diffusion Generierung abgeschlossen\n📐 {gs[0]}×{gs[1]}×{gs[2]} Voxels\n"
-                    f"⚙️ Temp={temp:.2f}, Top-K={topk}, Steps={num_steps}\n"
-                    f"🧠 Encoder: {self.tf_encoder.display_name}\n📝 Prompt: \"{prompt[:60]}...\"")
-            raw_shape = tuple(int(v) for v in grid.shape)
-            trimmed_grid = trim_token_grid(grid, air_id=0)
-            preview_grid = center_token_grid(trimmed_grid, raw_shape, air_id=0)
-            self.generated_grid = trimmed_grid
-            self.generated_np = preview_grid.numpy()
-            trimmed_shape = tuple(int(v) for v in trimmed_grid.shape)
-            unique_blocks = int(torch.unique(trimmed_grid).numel())
-            info += f"\n🧱 {unique_blocks} Blocktypen nach Trim"
-            if trimmed_shape != raw_shape:
-                info += f"\nTrim: {raw_shape[0]}x{raw_shape[1]}x{raw_shape[2]} -> {trimmed_shape[0]}x{trimmed_shape[1]}x{trimmed_shape[2]}"
-            self.after(0, self._tf_generation_done, info)
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            self.after(0, self._tf_generation_failed, str(e))
-
-    def _tf_generation_done(self, info: str):
-        self.tf_progress_bar_gen.stop()
-        self.tf_progress_bar_gen.set(1)
-        self.tf_generate_btn.configure(state="normal", text="✦ TF-Diffusion generieren")
-        self.tf_info_var.set(info)
-        self.status_var.set("✅ Fertig")
-        self.generation_running = False
-        self._update_tf_preview()
-        self.current_project_path = None
-
-    def _tf_generation_failed(self, error: str):
-        self.tf_progress_bar_gen.stop()
-        self.tf_progress_bar_gen.set(0)
-        self.tf_generate_btn.configure(state="normal", text="✦ TF-Diffusion generieren")
-        self.tf_info_var.set(f"❌ Fehler: {error}")
-        self.status_var.set(f"❌ {error}")
-        self.generation_running = False
-
     # ═══════════════════════════════════════════════════════════════
     # PROJECTS TAB
     # ═══════════════════════════════════════════════════════════════
@@ -1644,7 +1578,7 @@ class MinecraftStructureApp(ctk.CTk):
             "Ein KI-gestützter Minecraft Struktur Generator", "",
             "🚀 Features:",
             "  • 🤖 Transformer Diffusion (Hauptmodell)",
-            "     - Frozen pre-trained Text Encoder (Phi-3.5, Gemma, T5)",
+            "     - Frozen pre-trained Text Encoder (Phi-3.5, Gemma 2/3, Flan-T5)",
             "     - Cross-Attention statt Average Pooling",
             "     - 3D UNet mit diskreter Denoising Diffusion",
             "  • ⚡ Transformer Modell (Single-Pass)",
@@ -1654,7 +1588,7 @@ class MinecraftStructureApp(ctk.CTk):
             "  • Modell-Manager (mehrere Versionen, Default, Train More)",
             "  • Projekt-Management mit Speichern & Export",
             "  • GPU-beschleunigtes Training", "",
-            f"📊 Trainingsdaten: gut analysierte + augmentierte + gescrapte Strukturen",
+            f"📊 Trainingsdaten: gut analysierte + ausgelagerte Strukturen",
             f"🎯 Verfügbare Grid-Größen: {grid_sizes}", "",
             "Erstellt mit PyTorch, CustomTkinter & viel ❤️",
         ]
@@ -1946,13 +1880,9 @@ class MinecraftStructureApp(ctk.CTk):
     # ═══════════════════════════════════════════════════════════════
 
     def _update_tf_preview(self):
-        if self.generated_np is None or self.id_to_block is None:
-            return
-        img = render_preview(self.generated_np, self.id_to_block, view=self.current_view,
-                             size=(420, 380), azimuth=getattr(self, 'tf_azimuth', 45),
-                             elevation=30.0, scale=getattr(self, 'tf_zoom_scale', 3.5))
-        img_tk = ctk.CTkImage(light_image=img, dark_image=img, size=img.size)
-        self.tf_preview_label.configure(image=img_tk, text="")
+        """Update preview — delegates to _update_preview since TF-Diffusion
+        uses the same preview panel as all other model types."""
+        self._update_preview()
 
     # ═══════════════════════════════════════════════════════════════
     # 3D PREVIEW
@@ -2460,11 +2390,18 @@ class MinecraftStructureApp(ctk.CTk):
                 if continuing_diff:
                     model = self.diffusion_model
                 else:
+                    # Read diffusion steps from the GUI entry (default 50)
+                    diff_num_timesteps = 50
+                    if hasattr(self, 'diff_train_steps_entry'):
+                        try:
+                            diff_num_timesteps = int(self.diff_train_steps_entry.get())
+                        except (ValueError, TypeError):
+                            diff_num_timesteps = 50
                     model = VoxelDiffusionModel(
                         num_blocks=len(dataset.voxel_tokenizer.id_to_block),
                         text_vocab_size=len(dataset.prompt_tokenizer.token_to_id),
                         grid_size=grid_size, d_model=128, d_text=64, channels=64,
-                        channel_multipliers=(1, 2, 2), num_timesteps=50,
+                        channel_multipliers=(1, 2, 2), num_timesteps=diff_num_timesteps,
                     ).to(device)
                     dataset.prompt_tokenizer.save(out_dir / "prompt_vocab.json")
                     dataset.voxel_tokenizer.save(out_dir / "block_vocab.json")
@@ -2554,13 +2491,24 @@ class MinecraftStructureApp(ctk.CTk):
                 self._on_size_slider(self.size_slider_var.get())
                 arch = getattr(self, '_selected_arch', None)
             tf_unet_config = getattr(self, '_tf_unet_config', None)
+            # Get encoder info for TF-Diffusion Kaggle export
+            enc_name = None
+            ctx_dim = None
+            if model_type == "transformer_diffusion":
+                if self.tf_encoder is not None:
+                    enc_name = self.tf_encoder.display_name
+                    ctx_dim = self.tf_encoder.hidden_dim
+                else:
+                    enc_name = self.tf_encoder_combo.get()
+                    ctx_dim = 768  # safe default
             from kaggle_export import create_kaggle_export
             export_path = create_kaggle_export(output_dir="exports", epochs=epochs, batch_size=batch_size,
                                                learning_rate=lr, aug_diversity=aug_diversity,
                                                allow_vertical=allow_vertical, grid_size=grid_size,
                                                model_type=model_type, data_dirs=self.data_dirs,
                                                architecture=arch, tf_unet_config=tf_unet_config,
-                                               air_weight=air_weight)
+                                               air_weight=air_weight,
+                                               encoder_name=enc_name, context_dim=ctx_dim)
             self.after(0, lambda p=export_path: self.status_var.set(f"✅ Kaggle-Export erstellt: {p.name}"))
             self.after(0, lambda p=export_path: showinfo(
                 "Export erfolgreich",

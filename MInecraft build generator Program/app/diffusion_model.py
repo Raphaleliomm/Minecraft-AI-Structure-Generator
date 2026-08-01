@@ -189,7 +189,7 @@ class CrossAttnMiddleBlock3D(nn.Module):
 
 class VoxelDiffusionModel(nn.Module):
     def __init__(self, num_blocks: int, text_vocab_size: int, grid_size=(16, 16, 16),
-                 d_model: int = 64, d_text: int = 32, channels: int = 32,
+                 d_model: int = 128, d_text: int = 64, channels: int = 64,
                  channel_multipliers=(1, 2, 2), num_timesteps: int = 50):
         super().__init__()
         self.grid_size = grid_size
