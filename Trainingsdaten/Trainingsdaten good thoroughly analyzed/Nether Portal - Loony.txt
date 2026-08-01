@@ -1,0 +1,5 @@
+Generate a small, decorated Nether Portal using easy-to-obtain materials. It should have a dark theme.
+---
+Can you generate a dark-themed Minecraft Nether Portal using Deepslate Bricks, Polished Blackstone, and Crying Obsidian as the main building materials?
+---
+Create a schematic for a small, dark Minecraft Nether Portal structure. Primary Block palette: Deepslate, Blackstone, and Crying Obsidian.

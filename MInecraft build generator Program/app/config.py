@@ -12,7 +12,7 @@ CONFIG_PATH = Path("config.json")
 DEFAULT_CONFIG = {
     "theme": "dark",
     "grid_size": [16, 16, 16],
-    "default_model": "transformer",
+    "default_model": "transformer_diffusion",
     "default_transformer_name": "voxel_transformer_scaled",
     "default_diffusion_name": "diffusion_model",
     "default_tf_diffusion_name": None,
@@ -22,7 +22,7 @@ DEFAULT_CONFIG = {
     "noise_block_prob": 0.20,
     "export_directory": "exports",
     "projects_directory": "projects",
-    "language": "de",
+    "language": "en",
     "gpu_enabled": True,
 }
 
@@ -31,7 +31,7 @@ DEFAULT_CONFIG = {
 class AppConfig:
     theme: str = "dark"
     grid_size: list = (16, 16, 16)
-    default_model: str = "transformer"
+    default_model: str = "transformer_diffusion"
     default_transformer_name: str = "voxel_transformer_scaled"
     default_diffusion_name: str = "diffusion_model"
     default_tf_diffusion_name: Optional[str] = None
@@ -41,7 +41,7 @@ class AppConfig:
     noise_block_prob: float = 0.20
     export_directory: str = "exports"
     projects_directory: str = "projects"
-    language: str = "de"
+    language: str = "en"
     gpu_enabled: bool = True
 
     def save(self) -> None:
