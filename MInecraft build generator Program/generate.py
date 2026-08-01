@@ -14,12 +14,20 @@ ALLOWED_GRID_SIZES = {
     "16": (16, 16, 16),
     "32": (32, 32, 32),
     "48": (48, 48, 48),
+    "64": (64, 64, 64),
+    "96": (96, 96, 96),
+    "128": (128, 128, 128),
+    "256": (256, 256, 256),
 }
 
 ALLOWED_GRID_RUN_DIRS = {
     "16": "runs/voxel_transformer_16",
     "32": "runs/voxel_transformer_32",
     "48": "runs/voxel_transformer_48",
+    "64": "runs/voxel_transformer_64",
+    "96": "runs/voxel_transformer_96",
+    "128": "runs/voxel_transformer_128",
+    "256": "runs/voxel_transformer_256",
 }
 
 
@@ -39,7 +47,7 @@ def main() -> None:
     parser.add_argument("--output", default="generated.schem")
     parser.add_argument("--model-size", type=str, default="16",
                         choices=list(ALLOWED_GRID_SIZES.keys()),
-                        help="Model size: 16 = 16x16x16, 32 = 32x32x32, 48 = 48x48x48")
+                        help="Model size: 16 = 16x16x16, 32 = 32x32x32, 48 = 48x48x48, 64 = 64x64x64, 96 = 96x96x96, 128 = 128x128x128, 256 = 256x256x256")
     parser.add_argument("--grid-size", type=parse_size, default=None,
                         help="DEPRECATED: Use --model-size instead.")
     parser.add_argument("--temperature", type=float, default=0.9)
