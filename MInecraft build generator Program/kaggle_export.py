@@ -546,6 +546,17 @@ def _build_tf_diffusion_model_code(channels, ch_mult, d_model, ca_heads, encoder
 
 
 def _build_tf_diffusion_train_code(air_weight, encoder_name="Phi-3.5-mini", context_dim=768):
+    is_t5 = "t5" in encoder_name.lower()
+    if is_t5:
+        context_extract = (
+            "            outputs = encoder(input_ids=input_ids, attention_mask=attention_mask)\n"
+            "            context = outputs.last_hidden_state.to(dtype=next(model.parameters()).dtype)\n"
+        )
+    else:
+        context_extract = (
+            "            outputs = encoder(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)\n"
+            "            context = outputs.hidden_states[-1].to(dtype=next(model.parameters()).dtype)\n"
+        )
     return (
         "# 🎯 Training Loop\n"
         "best_loss = float('inf')\n"
@@ -561,8 +572,7 @@ def _build_tf_diffusion_train_code(air_weight, encoder_name="Phi-3.5-mini", cont
         "            encoded = tokenizer(prompts, return_tensors='pt', padding=True, truncation=True, max_length=512)\n"
         "            input_ids = encoded['input_ids'].to(DEVICE)\n"
         "            attention_mask = encoded['attention_mask'].to(DEVICE)\n"
-        "            outputs = encoder(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)\n"
-        "            context = outputs.hidden_states[-1].to(dtype=next(model.parameters()).dtype)\n"
+        + context_extract +
         "        loss = train_transformer_diffusion_step(model, batch, type('FakeEncoder', (), {'__call__': lambda self, x: {'last_hidden_state': context, 'attention_mask': attention_mask}})(), optimizer, DEVICE, noise_block_prob=NOISE_BLOCK_PROB)\n"
         "        total_loss += loss\n"
         "        num_batches += 1\n\n"

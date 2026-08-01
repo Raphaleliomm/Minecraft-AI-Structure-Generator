@@ -34,6 +34,7 @@ from app.hidden_state_cache import (
 )
 from app.voxel_preview import render_preview
 from app.voxel_viewer_3d import open_3d_viewer, HAS_PYGLET
+from app.translations import get_text as _get_text
 
 from dataset import PromptTokenizer, VoxelTokenizer, center_token_grid, load_schematic, save_schem, trim_token_grid
 from model import SharedWeightVoxelTransformer
@@ -146,6 +147,22 @@ class MinecraftStructureApp(ctk.CTk):
 
         # ─── Load default models ───
         self.after(100, self._load_models_async)
+
+    def _tr(self, key: str, **kwargs) -> str:
+        """Translate a UI string using the current language."""
+        return _get_text(key, self.config.language, **kwargs)
+
+    def _rebuild_ui(self):
+        """Rebuild the entire UI (used when language changes)."""
+        # Destroy all children and rebuild
+        for widget in self.winfo_children():
+            widget.destroy()
+        self._build_ui()
+        self._setup_tab_icons()
+        self._apply_minecraft_skin()
+        self._refresh_model_combo()
+        self._refresh_models_tab()
+        self._refresh_projects()
 
     def _discover_models(self):
         """Scan runs/ and load default names from config."""
@@ -1432,6 +1449,7 @@ class MinecraftStructureApp(ctk.CTk):
 
             optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
             total_start = time.time()
+            noise_block_prob = getattr(self.config, 'noise_block_prob', 0.20)
 
             for epoch in range(1, epochs + 1):
                 if not self.training_running:
@@ -1446,10 +1464,10 @@ class MinecraftStructureApp(ctk.CTk):
 
                     if use_cached:
                         # Use cached training step (no encoder needed)
-                        loss = train_transformer_diffusion_step_cached(model, batch, optimizer, device)
+                        loss = train_transformer_diffusion_step_cached(model, batch, optimizer, device, noise_block_prob=noise_block_prob)
                     else:
                         # Use live encoder
-                        loss = train_transformer_diffusion_step(model, batch, self.tf_encoder, optimizer, device)
+                        loss = train_transformer_diffusion_step(model, batch, self.tf_encoder, optimizer, device, noise_block_prob=noise_block_prob)
 
                     total_loss += loss
                     if batch_num % max(1, total_batches // 10) == 0 or batch_num == total_batches:
@@ -1540,24 +1558,24 @@ class MinecraftStructureApp(ctk.CTk):
         scroll.grid_columnconfigure(0, weight=1)
 
         row = 0
-        ctk.CTkLabel(scroll, text="Allgemein", font=("Segoe UI", 18, "bold")).grid(row=row, column=0, sticky="w", pady=(0, 10))
+        ctk.CTkLabel(scroll, text=self._tr("general"), font=("Segoe UI", 18, "bold")).grid(row=row, column=0, sticky="w", pady=(0, 10))
         row += 1
 
-        ctk.CTkLabel(scroll, text="GPU verwenden:").grid(row=row, column=0, sticky="w", pady=2)
+        ctk.CTkLabel(scroll, text=self._tr("use_gpu")).grid(row=row, column=0, sticky="w", pady=2)
         row += 1
         self.setting_gpu = ctk.CTkSwitch(scroll, text="CUDA GPU", onvalue=True, offvalue=False)
         self.setting_gpu.grid(row=row, column=0, sticky="w", pady=2)
         self.setting_gpu.select() if self.config.gpu_enabled else self.setting_gpu.deselect()
         row += 1
 
-        ctk.CTkLabel(scroll, text="Sprache:").grid(row=row, column=0, sticky="w", pady=2)
+        ctk.CTkLabel(scroll, text=self._tr("language")).grid(row=row, column=0, sticky="w", pady=2)
         row += 1
         self.setting_lang = ctk.CTkOptionMenu(scroll, values=["Deutsch", "English"])
         self.setting_lang.grid(row=row, column=0, sticky="w", pady=2)
         self.setting_lang.set("Deutsch" if self.config.language == "de" else "English")
         row += 1
 
-        ctk.CTkButton(scroll, text="💾 Einstellungen speichern", font=("Segoe UI", 13, "bold"),
+        ctk.CTkButton(scroll, text=self._tr("btn_save_settings"), font=("Segoe UI", 13, "bold"),
                       fg_color="#059669", hover_color="#047857",
                       command=self._save_settings).grid(row=row, column=0, sticky="w", pady=20)
 
@@ -2063,10 +2081,14 @@ class MinecraftStructureApp(ctk.CTk):
     # ═══════════════════════════════════════════════════════════════
 
     def _save_settings(self):
+        old_lang = self.config.language
         self.config.gpu_enabled = bool(self.setting_gpu.get())
         self.config.language = "de" if self.setting_lang.get() == "Deutsch" else "en"
         self.config.save()
-        self.status_var.set("✅ Einstellungen gespeichert")
+        self.status_var.set(self._tr("status_settings_saved"))
+        # Rebuild UI if language changed
+        if old_lang != self.config.language:
+            self.after(100, self._rebuild_ui)
         self._load_models_async()
 
     def _stop_training(self):
@@ -2408,6 +2430,7 @@ class MinecraftStructureApp(ctk.CTk):
 
                 optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
                 total_start = time.time()
+                noise_block_prob = getattr(self.config, 'noise_block_prob', 0.20)
                 for epoch in range(1, epochs + 1):
                     if not self.training_running:
                         break
@@ -2418,7 +2441,7 @@ class MinecraftStructureApp(ctk.CTk):
                         if not self.training_running:
                             break
                         batch_num += 1
-                        loss = train_diffusion_step(model, batch, optimizer, device)
+                        loss = train_diffusion_step(model, batch, optimizer, device, noise_block_prob=noise_block_prob)
                         total_loss += loss
                         if batch_num % max(1, total_batches // 10) == 0 or batch_num == total_batches:
                             self.after(0, lambda bp=batch_num/total_batches, bn=batch_num, tb=total_batches: (
@@ -2500,7 +2523,25 @@ class MinecraftStructureApp(ctk.CTk):
                     ctx_dim = self.tf_encoder.hidden_dim
                 else:
                     enc_name = self.tf_encoder_combo.get()
-                    ctx_dim = 768  # safe default
+                    # Look up hidden_dim from the encoder registry
+                    from app.transformer_encoder import MODEL_TO_ID
+                    # Known hidden dims for supported encoders
+                    _ENCODER_HIDDEN_DIMS = {
+                        "Phi-3.5-mini": 3072,
+                        "Gemma-2-2B": 2304,
+                        "Gemma-2-9B": 3584,
+                        "Gemma-2-27B": 4608,
+                        "Gemma-3-1B": 768,
+                        "Gemma-3-4B": 2560,
+                        "Gemma-3-12B": 3840,
+                        "Gemma-3-27B": 5120,
+                        "Flan-T5-small": 512,
+                        "Flan-T5-base": 768,
+                        "Flan-T5-large": 1024,
+                        "Flan-T5-XL": 2048,
+                        "Flan-T5-XXL": 4096,
+                    }
+                    ctx_dim = _ENCODER_HIDDEN_DIMS.get(enc_name, 3072)  # Default to Phi-3.5-mini dim
             from kaggle_export import create_kaggle_export
             export_path = create_kaggle_export(output_dir="exports", epochs=epochs, batch_size=batch_size,
                                                learning_rate=lr, aug_diversity=aug_diversity,
