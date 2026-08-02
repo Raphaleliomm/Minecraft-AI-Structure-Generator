@@ -70,7 +70,7 @@ TRANSLATIONS = {
     "diff_steps": {"en": "Diff. Steps:", "de": "Diff. Steps:"},
     "btn_generate": {"en": "✦ Generate", "de": "✦ Generieren"},
     "btn_generating": {"en": "⏳ Generating...", "de": "⏳ Generiere..."},
-    "btn_save": {"en": "💾 Save", "de": "💾 Save"},
+    "btn_save": {"en": "💾 Save", "de": "💾 Speichern"},
     "btn_export_schem": {"en": "📤 Export .schem", "de": "📤 Export .schem"},
     "rotation": {"en": "↔ Rotation:", "de": "↔ Drehung:"},
     "preview_hint": {"en": "🖱 Drag horizontally to rotate\nScroll to zoom", "de": "🖱 Horizontal ziehen zum Drehen\nScroll zum Zoomen"},
