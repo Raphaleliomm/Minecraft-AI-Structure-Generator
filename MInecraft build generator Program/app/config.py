@@ -16,7 +16,7 @@ DEFAULT_CONFIG = {
     "default_transformer_name": "voxel_transformer_scaled",
     "default_diffusion_name": "diffusion_model",
     "default_tf_diffusion_name": None,
-    "temperature": 0.85,
+    "temperature": 0.2,
     "top_k": 40,
     "diffusion_steps": 50,
     "noise_block_prob": 0.20,
@@ -35,7 +35,7 @@ class AppConfig:
     default_transformer_name: str = "voxel_transformer_scaled"
     default_diffusion_name: str = "diffusion_model"
     default_tf_diffusion_name: Optional[str] = None
-    temperature: float = 0.85
+    temperature: float = 0.2
     top_k: int = 40
     diffusion_steps: int = 50
     noise_block_prob: float = 0.20

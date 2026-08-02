@@ -1699,15 +1699,17 @@ class MinecraftStructureApp(ctk.CTk):
                     enc_dtype = torch.float16 if enc_device.type == "cuda" else torch.float32
                     if self.tf_encoder is None or self.tf_encoder.display_name != encoder_name:
                         self.tf_encoder = FrozenTransformerEncoder(model_name=encoder_name, device=enc_device, dtype=enc_dtype)
+                    # Default context_proj_dim to d_model*2 to match training behavior
+                    _loaded_d_model = ckpt.get("d_model", 64)
                     model = TransformerDiffusionModel(
                         num_blocks=ckpt.get("num_blocks", ckpt.get("block_vocab_size", 0)),
                         grid_size=tuple(ckpt.get("grid_size", (16, 16, 16))),
-                        d_model=ckpt.get("d_model", 64), channels=ckpt.get("channels", 32),
+                        d_model=_loaded_d_model, channels=ckpt.get("channels", 32),
                         channel_multipliers=tuple(ckpt.get("channel_multipliers", (1, 2, 2))),
                         num_timesteps=ckpt.get("num_timesteps", 50),
                         context_dim=ckpt.get("context_dim", 768),
                         cross_attn_heads=ckpt.get("cross_attn_heads", 4),
-                        context_proj_dim=ckpt.get("context_proj_dim", None),
+                        context_proj_dim=ckpt.get("context_proj_dim", _loaded_d_model * 2),
                     ).to(device)
                     model.load_state_dict(ckpt["model_state"], strict=True)
                     model.eval()
@@ -2190,6 +2192,9 @@ class MinecraftStructureApp(ctk.CTk):
 
     def _get_suggested_arch(self) -> Optional[dict]:
         grid_size = self._get_selected_grid_size()
+        # Use actual vocab sizes from loaded tokenizers if available, otherwise use defaults
+        text_vocab = len(self.prompt_tokenizer.token_to_id) if self.prompt_tokenizer else 129
+        block_vocab = len(self.voxel_tokenizer.id_to_block) if self.voxel_tokenizer else 253
         if self.show_advanced:
             try:
                 d_model = int(self.adv_vars["d_model"].get())
@@ -2198,7 +2203,7 @@ class MinecraftStructureApp(ctk.CTk):
                 ff_ratio = int(self.adv_vars["ff_ratio"].get())
                 dim_ff = d_model * ff_ratio
                 from model import estimate_transformer_params
-                params = estimate_transformer_params(129, 253, grid_size, d_model, nhead, layers, dim_ff)
+                params = estimate_transformer_params(text_vocab, block_vocab, grid_size, d_model, nhead, layers, dim_ff)
                 return {"d_model": d_model, "nhead": nhead, "num_layers": layers,
                         "dim_feedforward": dim_ff, "params": params, "params_m": params / 1_000_000}
             except (ValueError, ZeroDivisionError):
@@ -2206,7 +2211,7 @@ class MinecraftStructureApp(ctk.CTk):
         else:
             target_m = self.size_slider_var.get()
             from model import suggest_architecture
-            return suggest_architecture(target_m, 129, 253, grid_size)
+            return suggest_architecture(target_m, text_vocab, block_vocab, grid_size)
 
     def _on_size_slider(self, value: float):
         if self.show_advanced:

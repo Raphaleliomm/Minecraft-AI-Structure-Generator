@@ -9,7 +9,7 @@
   "default_transformer_name": "voxel_transformer_scaled",
   "default_diffusion_name": "diffusion_model",
   "default_tf_diffusion_name": null,
-  "temperature": 0.85,
+  "temperature": 0.2,
   "top_k": 40,
   "diffusion_steps": 50,
   "noise_block_prob": 0.20,
