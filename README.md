@@ -133,7 +133,3 @@ Erzeugt eine portable Windows-Distribution mit embedded Python im `dist/`-Ordner
 ```powershell
 python -m pytest tests -q -p no:cacheprovider
 ```
-
-## Lizenz
-
-MIT
