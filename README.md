@@ -116,9 +116,13 @@ Siehe `requirements.txt`:
 - customtkinter>=5.0.0
 - Pillow>=10.0.0
 - numpy>=1.24.0
+- transformers>=4.30.0
+- pyglet>=2.0.0
 
-Für den 3D-Viewer zusätzlich: `pip install pyglet`
-Für Text-Encoder: `pip install transformers`
+Installation aller Abhängigkeiten:
+```powershell
+pip install -r requirements.txt
+```
 
 ## Portable Distribution
 
