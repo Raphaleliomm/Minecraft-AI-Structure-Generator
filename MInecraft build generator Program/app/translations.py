@@ -229,6 +229,31 @@ TRANSLATIONS = {
     "training_error": {"en": "❌ Error: {msg}", "de": "❌ Fehler: {msg}"},
     "with_cached_hs": {"en": "with Pre-Computed HS", "de": "mit Pre-Computed HS"},
     "with_encoder": {"en": "with Encoder", "de": "mit Encoder"},
+
+    # ─── Advanced settings labels ───
+    "adv_d_model": {"en": "d_model (Model Dimension)", "de": "d_model (Modell-Dimension)"},
+    "adv_nhead": {"en": "nhead (Attention Heads)", "de": "nhead (Attention Heads)"},
+    "adv_layers": {"en": "Layers (Decoder Levels)", "de": "Layers (Decoder-Ebenen)"},
+    "adv_ff_ratio": {"en": "FFN Multiplier", "de": "FFN Multiplikator"},
+
+    # ─── Train More dialog labels ───
+    "tm_epochs": {"en": "Epochs:", "de": "Epochen:"},
+    "tm_batch_size": {"en": "Batch Size:", "de": "Batch Size:"},
+    "tm_learning_rate": {"en": "Learning Rate:", "de": "Learning Rate:"},
+    "tm_diversity": {"en": "Diversity:", "de": "Vielfalt:"},
+
+    # ─── About tab title ───
+    "about_title": {"en": "🏗️ {name} v{version}", "de": "🏗️ {name} v{version}"},
+
+    # ─── Additional status messages ───
+    "status_no_suitable_model": {"en": "⚠️ No suitable model loaded", "de": "⚠️ Kein passendes Modell geladen"},
+    "status_pyglet_not_installed": {"en": "❌ pyglet not installed", "de": "❌ pyglet nicht installiert"},
+    "status_delete_confirm_title": {"en": "Delete Model", "de": "Modell löschen"},
+    "status_delete_confirm": {"en": "🚨 Really delete '{name}'?\n\n{path}", "de": "🚨 Wirklich '{name}' löschen?\n\n{path}"},
+    "status_rename_title": {"en": "Rename Model", "de": "Modell umbenennen"},
+    "status_rename_prompt": {"en": "New name for '{old}':", "de": "Neuer Name für '{old}':"},
+    "status_rename_success": {"en": "✏️ {old} → {new}", "de": "✏️ {old} → {new}"},
+    "status_rename_failed": {"en": "❌ Rename failed (does {name} exist?)", "de": "❌ Umbenennen fehlgeschlagen (existiert {name}?)"},
 }
 
 

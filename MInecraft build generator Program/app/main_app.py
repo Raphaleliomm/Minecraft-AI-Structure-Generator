@@ -285,12 +285,12 @@ class MinecraftStructureApp(ctk.CTk):
         self.tab_view.grid_columnconfigure(0, weight=1)
 
         # ─── Create Tabs ───
-        self.tab_generate = self.tab_view.add("🎨 Generieren")
-        self.tab_models = self.tab_view.add("🧠 Modelle")
-        self.tab_training = self.tab_view.add("🎯 Training")
-        self.tab_projects = self.tab_view.add("📂 Projekte")
-        self.tab_settings = self.tab_view.add("⚙️ Einstellungen")
-        self.tab_about = self.tab_view.add("ℹ️ Über")
+        self.tab_generate = self.tab_view.add(self._tr("tab_generate"))
+        self.tab_models = self.tab_view.add(self._tr("tab_models"))
+        self.tab_training = self.tab_view.add(self._tr("tab_training"))
+        self.tab_projects = self.tab_view.add(self._tr("tab_projects"))
+        self.tab_settings = self.tab_view.add(self._tr("tab_settings"))
+        self.tab_about = self.tab_view.add(self._tr("tab_about"))
 
         self._build_generate_tab()
         self._build_models_tab()
@@ -300,7 +300,7 @@ class MinecraftStructureApp(ctk.CTk):
         self._build_about_tab()
 
         # ─── Status Bar ───
-        self.status_var = ctk.StringVar(value="✅ Bereit")
+        self.status_var = ctk.StringVar(value=self._tr("status_ready"))
         self.status_bar = ctk.CTkLabel(self, textvariable=self.status_var,
                                        fg_color=MC_DIRT_DARK, corner_radius=0,
                                        text_color=MC_TEXT, font=self._mc_font(12, "bold"),
@@ -334,7 +334,7 @@ class MinecraftStructureApp(ctk.CTk):
         model_frame.grid_columnconfigure(1, weight=1)
         model_frame.grid_columnconfigure(3, weight=1)
 
-        ctk.CTkLabel(model_frame, text="Modell-Typ:", font=("Segoe UI", 14, "bold")).grid(row=0, column=0, padx=(0, 8))
+        ctk.CTkLabel(model_frame, text=self._tr("model_type"), font=("Segoe UI", 14, "bold")).grid(row=0, column=0, padx=(0, 8))
         self.model_type_selector = ctk.CTkSegmentedButton(
             model_frame, values=["Transformer", "Diffusion", "TF-Diffusion"],
             command=self._on_model_type_change, font=("Segoe UI", 12),
@@ -342,9 +342,9 @@ class MinecraftStructureApp(ctk.CTk):
         self.model_type_selector.grid(row=0, column=1, sticky="ew", padx=(0, 12))
         self.model_type_selector.set("TF-Diffusion")
 
-        ctk.CTkLabel(model_frame, text="Version:", font=("Segoe UI", 14, "bold")).grid(row=0, column=2, padx=(0, 8))
+        ctk.CTkLabel(model_frame, text=self._tr("version"), font=("Segoe UI", 14, "bold")).grid(row=0, column=2, padx=(0, 8))
         self.model_version_combo = ctk.CTkOptionMenu(
-            model_frame, values=["(keine)"], font=("Segoe UI", 12), command=self._on_model_version_change,
+            model_frame, values=[self._tr("none")], font=("Segoe UI", 12), command=self._on_model_version_change,
         )
         self.model_version_combo.grid(row=0, column=3, sticky="ew")
 
@@ -354,7 +354,7 @@ class MinecraftStructureApp(ctk.CTk):
         prompt_frame.grid_rowconfigure(1, weight=1)
         prompt_frame.grid_columnconfigure(0, weight=1)
 
-        ctk.CTkLabel(prompt_frame, text="Baubeschreibung:", font=("Segoe UI", 13, "bold")).grid(row=0, column=0, sticky="w", pady=(0, 4))
+        ctk.CTkLabel(prompt_frame, text=self._tr("build_description"), font=("Segoe UI", 13, "bold")).grid(row=0, column=0, sticky="w", pady=(0, 4))
         self.prompt_text = ctk.CTkTextbox(prompt_frame, height=120, font=("Segoe UI", 12), wrap="word")
         self.prompt_text.grid(row=1, column=0, sticky="nsew")
         self.prompt_text.insert("1.0", "small medieval wooden cottage with stone foundation and steep oak roof")
@@ -364,23 +364,23 @@ class MinecraftStructureApp(ctk.CTk):
         params_frame.grid(row=2, column=0, sticky="nsew", pady=6, padx=10)
         params_frame.grid_columnconfigure(1, weight=1)
 
-        ctk.CTkLabel(params_frame, text="Parameter:", font=("Segoe UI", 13, "bold")).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 8))
+        ctk.CTkLabel(params_frame, text=self._tr("parameters"), font=("Segoe UI", 13, "bold")).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 8))
 
-        ctk.CTkLabel(params_frame, text="Temperatur:").grid(row=1, column=0, sticky="w", padx=(0, 8))
+        ctk.CTkLabel(params_frame, text=self._tr("temperature")).grid(row=1, column=0, sticky="w", padx=(0, 8))
         self.temp_slider = ctk.CTkSlider(params_frame, from_=0.0, to=1.5, number_of_steps=15)
         self.temp_slider.grid(row=1, column=1, sticky="ew", padx=(0, 8))
         self.temp_slider.set(self.config.temperature)
         self.temp_label = ctk.CTkLabel(params_frame, text=f"{self.config.temperature:.2f}", width=40)
         self.temp_label.grid(row=1, column=2, sticky="w")
 
-        ctk.CTkLabel(params_frame, text="Top-K:").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=(6, 0))
+        ctk.CTkLabel(params_frame, text=self._tr("top_k")).grid(row=2, column=0, sticky="w", padx=(0, 8), pady=(6, 0))
         self.topk_slider = ctk.CTkSlider(params_frame, from_=5, to=100, number_of_steps=19)
         self.topk_slider.grid(row=2, column=1, sticky="ew", padx=(0, 8), pady=(6, 0))
         self.topk_slider.set(self.config.top_k)
         self.topk_label = ctk.CTkLabel(params_frame, text=f"{self.config.top_k}", width=40)
         self.topk_label.grid(row=2, column=2, sticky="w", pady=(6, 0))
 
-        self.diff_steps_label = ctk.CTkLabel(params_frame, text="Diff. Steps:")
+        self.diff_steps_label = ctk.CTkLabel(params_frame, text=self._tr("diff_steps"))
         self.diff_steps_slider = ctk.CTkSlider(params_frame, from_=10, to=500)
         self.diff_steps_slider.set(self.config.diffusion_steps)
         self.diff_steps_value = ctk.CTkLabel(params_frame, text=f"{self.config.diffusion_steps}", width=40)
@@ -399,14 +399,14 @@ class MinecraftStructureApp(ctk.CTk):
         btn_frame.grid_columnconfigure(1, weight=1)
         btn_frame.grid_columnconfigure(2, weight=1)
 
-        self.generate_btn = ctk.CTkButton(btn_frame, text="✦ Generieren", font=("Segoe UI", 14, "bold"),
+        self.generate_btn = ctk.CTkButton(btn_frame, text=self._tr("btn_generate"), font=("Segoe UI", 14, "bold"),
                                           height=40, fg_color="#2563eb", hover_color="#1d4ed8",
                                           command=self._generate_structure)
         self.generate_btn.grid(row=0, column=0, sticky="ew", padx=(0, 4))
-        self.save_btn = ctk.CTkButton(btn_frame, text="💾 Save", font=("Segoe UI", 13), height=40,
+        self.save_btn = ctk.CTkButton(btn_frame, text=self._tr("btn_save"), font=("Segoe UI", 13), height=40,
                                       state="disabled", command=self._save_to_project)
         self.save_btn.grid(row=0, column=1, sticky="ew", padx=4)
-        self.export_btn = ctk.CTkButton(btn_frame, text="📤 Export .schem", font=("Segoe UI", 13),
+        self.export_btn = ctk.CTkButton(btn_frame, text=self._tr("btn_export_schem"), font=("Segoe UI", 13),
                                         height=40, state="disabled", fg_color="#1e293b",
                                         command=self._export_schematic)
         self.export_btn.grid(row=0, column=2, sticky="ew", padx=(4, 0))
@@ -417,7 +417,7 @@ class MinecraftStructureApp(ctk.CTk):
         right.grid_rowconfigure(2, weight=1)
         right.grid_columnconfigure(0, weight=1)
 
-        self.model_status = ctk.CTkLabel(right, text="⏳ Lade Modelle...", font=("Segoe UI", 12),
+        self.model_status = ctk.CTkLabel(right, text=self._tr("status_loading_models"), font=("Segoe UI", 12),
                                          fg_color=("gray90", "gray20"), corner_radius=6)
         self.model_status.grid(row=0, column=0, sticky="ew", pady=(10, 4), padx=10)
 
@@ -429,7 +429,7 @@ class MinecraftStructureApp(ctk.CTk):
         orbit_frame.grid_columnconfigure(3, weight=1)
         orbit_frame.grid_columnconfigure(4, weight=0)
 
-        ctk.CTkLabel(orbit_frame, text="↔ Drehung:", font=("Segoe UI", 12)).grid(row=0, column=0, padx=(0, 6))
+        ctk.CTkLabel(orbit_frame, text=self._tr("rotation"), font=("Segoe UI", 12)).grid(row=0, column=0, padx=(0, 6))
         ctk.CTkButton(orbit_frame, text="NW", font=("Segoe UI", 11), width=50, height=26,
                       command=lambda: self._set_horizontal_orbit(45)).grid(row=0, column=1, padx=2)
         ctk.CTkButton(orbit_frame, text="NO", font=("Segoe UI", 11), width=50, height=26,
@@ -442,7 +442,7 @@ class MinecraftStructureApp(ctk.CTk):
         self.zoom_slider.set(self.zoom_scale)
         self.zoom_slider.configure(command=lambda v: self._update_zoom(v))
 
-        self.preview_label = ctk.CTkLabel(right, text="🖱 Horizontal ziehen zum Drehen\nScroll zum Zoomen",
+        self.preview_label = ctk.CTkLabel(right, text=self._tr("preview_hint"),
                                           font=("Segoe UI", 14))
         self.preview_label.grid(row=2, column=0, sticky="nsew", padx=10, pady=4)
 
@@ -473,7 +473,7 @@ class MinecraftStructureApp(ctk.CTk):
         viewer_btn_frame.grid_columnconfigure(0, weight=1)
         viewer_btn_frame.grid_columnconfigure(1, weight=1)
 
-        self.viewer_btn = ctk.CTkButton(viewer_btn_frame, text="🎮 3D Viewer öffnen (OpenGL)",
+        self.viewer_btn = ctk.CTkButton(viewer_btn_frame, text=self._tr("btn_3d_viewer"),
                                         font=("Segoe UI", 13, "bold"), height=36,
                                         fg_color="#7c3aed", hover_color="#6d28d9",
                                         state="disabled", command=self._open_3d_viewer)
@@ -486,8 +486,8 @@ class MinecraftStructureApp(ctk.CTk):
         self.progress_bar.grid(row=5, column=0, sticky="ew", padx=10, pady=(0, 8))
         self.progress_bar.set(0)
         if not HAS_PYGLET:
-            self.viewer_status.configure(text="⚠️ pyglet fehlt", text_color="#f87171")
-            self.viewer_btn.configure(state="disabled", text="🎮 3D Viewer (pyglet fehlt)")
+            self.viewer_status.configure(text=self._tr("pyglet_missing"), text_color="#f87171")
+            self.viewer_btn.configure(state="disabled", text=self._tr("btn_3d_viewer_missing"))
 
         # Refresh model list
         self._refresh_model_combo()
@@ -507,11 +507,11 @@ class MinecraftStructureApp(ctk.CTk):
         header = ctk.CTkFrame(scroll, fg_color="transparent")
         header.grid(row=0, column=0, sticky="ew", pady=(0, 16))
         header.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(header, text="🧠 Modell-Manager", font=("Segoe UI", 22, "bold")).grid(row=0, column=0, sticky="w")
-        ctk.CTkButton(header, text="🔄 Scannen", font=("Segoe UI", 12),
+        ctk.CTkLabel(header, text=self._tr("model_manager"), font=("Segoe UI", 22, "bold")).grid(row=0, column=0, sticky="w")
+        ctk.CTkButton(header, text=self._tr("btn_scan"), font=("Segoe UI", 12),
                       command=self._refresh_models_tab, width=120).grid(row=0, column=1, padx=8)
-        ctk.CTkButton(header, text="⬅ Zurück zum Editor", font=("Segoe UI", 12),
-                      command=lambda: self.tab_view.set("🎨 Generieren"), width=160).grid(row=0, column=2)
+        ctk.CTkButton(header, text=self._tr("btn_back_editor"), font=("Segoe UI", 12),
+                      command=lambda: self.tab_view.set(self._tr("tab_generate")), width=160).grid(row=0, column=2)
 
         sep1 = ctk.CTkFrame(scroll, height=3, fg_color="#2563eb")
         sep1.grid(row=1, column=0, sticky="ew", pady=(0, 12))
@@ -527,12 +527,12 @@ class MinecraftStructureApp(ctk.CTk):
             widget.destroy()
         row = 0
         # TF-Diffusion
-        ctk.CTkLabel(self.models_container, text="🤖 Transformer Diffusion Modelle",
+        ctk.CTkLabel(self.models_container, text=self._tr("tf_diffusion_models"),
                      font=("Segoe UI", 18, "bold"), text_color="#c084fc").grid(row=row, column=0, sticky="w", pady=(0, 8))
         row += 1
         tf_diff_models = self.model_registry.get_by_type("transformer_diffusion")
         if not tf_diff_models:
-            ctk.CTkLabel(self.models_container, text="  (Keine Transformer Diffusion Modelle gefunden)",
+            ctk.CTkLabel(self.models_container, text=self._tr("no_tf_diffusion"),
                          font=("Segoe UI", 12), text_color=("gray60", "gray50")).grid(row=row, column=0, sticky="w", pady=(0, 12))
             row += 1
         else:
@@ -543,12 +543,12 @@ class MinecraftStructureApp(ctk.CTk):
         sep.grid(row=row, column=0, sticky="ew", pady=16)
         row += 1
         # Transformers
-        ctk.CTkLabel(self.models_container, text="⚡ Transformer Modelle",
+        ctk.CTkLabel(self.models_container, text=self._tr("transformer_models"),
                      font=("Segoe UI", 18, "bold"), text_color="#60a5fa").grid(row=row, column=0, sticky="w", pady=(0, 8))
         row += 1
         transformers = self.model_registry.get_by_type("transformer")
         if not transformers:
-            ctk.CTkLabel(self.models_container, text="  (Keine Transformer-Modelle gefunden)",
+            ctk.CTkLabel(self.models_container, text=self._tr("no_transformer"),
                          font=("Segoe UI", 12), text_color=("gray60", "gray50")).grid(row=row, column=0, sticky="w", pady=(0, 12))
             row += 1
         else:
@@ -559,12 +559,12 @@ class MinecraftStructureApp(ctk.CTk):
         sep2.grid(row=row, column=0, sticky="ew", pady=16)
         row += 1
         # Diffusions
-        ctk.CTkLabel(self.models_container, text="🌀 Diffusion Modelle",
+        ctk.CTkLabel(self.models_container, text=self._tr("diffusion_models"),
                      font=("Segoe UI", 18, "bold"), text_color="#a78bfa").grid(row=row, column=0, sticky="w", pady=(0, 8))
         row += 1
         diffusions = self.model_registry.get_by_type("diffusion")
         if not diffusions:
-            ctk.CTkLabel(self.models_container, text="  (Keine Diffusion-Modelle gefunden)",
+            ctk.CTkLabel(self.models_container, text=self._tr("no_diffusion"),
                          font=("Segoe UI", 12), text_color=("gray60", "gray50")).grid(row=row, column=0, sticky="w", pady=(0, 12))
             row += 1
         else:
@@ -587,7 +587,7 @@ class MinecraftStructureApp(ctk.CTk):
         hdr.grid_columnconfigure(0, weight=1)
         name_text = f"📦 {entry.name}"
         if is_default:
-            name_text += "  👑 Standard"
+            name_text += self._tr("default_badge")
         ctk.CTkLabel(hdr, text=name_text, font=("Segoe UI", 15, "bold")).grid(row=0, column=0, sticky="w")
         badge_color = "#3b82f6" if entry.model_type == "transformer" else "#8b5cf6"
         if entry.model_type == "transformer_diffusion":
@@ -598,35 +598,36 @@ class MinecraftStructureApp(ctk.CTk):
         meta.grid(row=1, column=0, sticky="ew", padx=14, pady=2)
         meta.grid_columnconfigure(0, weight=1)
         grid_str = f"{entry.grid_size[0]}×{entry.grid_size[1]}×{entry.grid_size[2]}"
+        bl = self._tr("blocks_label")
         if entry.model_type == "transformer":
             info = (f"d_model={entry.d_model}  heads={entry.nhead}  layers={entry.num_layers}  "
-                    f"FFN={entry.dim_feedforward}  Blöcke={entry.block_vocab_size}")
+                    f"FFN={entry.dim_feedforward}  {bl}={entry.block_vocab_size}")
         elif entry.model_type == "transformer_diffusion":
             info = (f"d_model={entry.d_model}  channels={entry.channels}  steps={entry.num_timesteps}  "
-                    f"encoder={entry.encoder_name or '?'}  Blöcke={entry.block_vocab_size}")
+                    f"encoder={entry.encoder_name or '?'}  {bl}={entry.block_vocab_size}")
         else:
             info = (f"d_model={entry.d_model}  channels={entry.channels}  steps={entry.num_timesteps}  "
-                    f"Blöcke={entry.block_vocab_size}")
+                    f"{bl}={entry.block_vocab_size}")
         ctk.CTkLabel(meta, text=f"📐 {grid_str}  🧱 {info}", font=("Segoe UI", 11),
                      text_color=("gray50", "gray40")).grid(row=0, column=0, sticky="w")
         if entry.epochs_trained > 0:
-            ctk.CTkLabel(meta, text=f"📊 {entry.epochs_trained} Epochen  Loss={entry.last_loss:.4f}",
+            ctk.CTkLabel(meta, text=f"📊 {entry.epochs_trained} {self._tr('epochs_label')}  Loss={entry.last_loss:.4f}",
                          font=("Segoe UI", 11), text_color=("gray50", "gray40")).grid(row=1, column=0, sticky="w")
         actions = ctk.CTkFrame(card, fg_color="transparent")
         actions.grid(row=2, column=0, sticky="ew", padx=14, pady=(6, 10))
         actions.grid_columnconfigure(0, weight=1)
-        ctk.CTkButton(actions, text="► Laden", font=("Segoe UI", 11), width=80, height=28,
+        ctk.CTkButton(actions, text=self._tr("btn_load"), font=("Segoe UI", 11), width=80, height=28,
                       fg_color="#2563eb", hover_color="#1d4ed8",
                       command=lambda n=entry.name: self._load_single_model(n)).grid(row=0, column=0, sticky="w", padx=(0, 4))
-        ctk.CTkButton(actions, text="👑 Als Standard", font=("Segoe UI", 11), width=100, height=28,
+        ctk.CTkButton(actions, text=self._tr("btn_set_default"), font=("Segoe UI", 11), width=100, height=28,
                       command=lambda n=entry.name: self._set_model_default(n)).grid(row=0, column=1, padx=4)
-        ctk.CTkButton(actions, text="🎯 Weiter trainieren", font=("Segoe UI", 11), width=130, height=28,
+        ctk.CTkButton(actions, text=self._tr("btn_train_more"), font=("Segoe UI", 11), width=130, height=28,
                       fg_color="#7c3aed", hover_color="#6d28d9",
                       command=lambda n=entry.name: self._train_more_model(n)).grid(row=0, column=2, padx=4)
         self._model_table_frames[entry.name] = card
-        ctk.CTkButton(actions, text="✏️ Umbenennen", font=("Segoe UI", 11), width=110, height=28,
+        ctk.CTkButton(actions, text=self._tr("btn_rename"), font=("Segoe UI", 11), width=110, height=28,
                       command=lambda n=entry.name: self._rename_model_dialog(n)).grid(row=0, column=3, padx=4)
-        ctk.CTkButton(actions, text="🗑 Löschen", font=("Segoe UI", 11), width=90, height=28,
+        ctk.CTkButton(actions, text=self._tr("btn_delete"), font=("Segoe UI", 11), width=90, height=28,
                       fg_color="#dc2626", hover_color="#b91c1c",
                       command=lambda n=entry.name: self._delete_model_confirm(n)).grid(row=0, column=4, padx=4)
 
@@ -635,7 +636,7 @@ class MinecraftStructureApp(ctk.CTk):
     def _load_single_model(self, name: str):
         entry = self.model_registry.get(name)
         if entry is None:
-            self.status_var.set(f"❌ Modell {name} nicht gefunden")
+            self.status_var.set(self._tr("status_model_not_found", name=name))
             return
         if entry.model_type == "transformer":
             self.model_type = "transformer"
@@ -649,10 +650,10 @@ class MinecraftStructureApp(ctk.CTk):
             self.model_type = "transformer_diffusion"
             self.current_tf_diffusion_name = name
             self.model_type_selector.set("TF-Diffusion")
-        self.tab_view.set("🎨 Generieren")
+        self.tab_view.set(self._tr("tab_generate"))
         self._refresh_model_combo()
         self._load_models_async()
-        self.status_var.set(f"📥 Lade Modell: {name}...")
+        self.status_var.set(self._tr("status_model_loading", name=name))
 
     def _set_model_default(self, name: str):
         if self.model_registry.set_default(name):
@@ -666,20 +667,20 @@ class MinecraftStructureApp(ctk.CTk):
                     self.config.default_tf_diffusion_name = name
                 self.config.save()
             self._refresh_models_tab()
-            self.status_var.set(f"👑 {name} ist jetzt Standard-{entry.model_type.upper()}")
+            self.status_var.set(self._tr("status_model_default_set", name=name, type=entry.model_type.upper()))
         else:
-            self.status_var.set(f"❌ Konnte {name} nicht als Standard setzen")
+            self.status_var.set(self._tr("status_model_default_failed", name=name))
 
     def _train_more_model(self, name: str):
         entry = self.model_registry.get(name)
         if entry is None:
-            self.status_var.set(f"❌ Modell {name} nicht gefunden")
+            self.status_var.set(self._tr("status_model_not_found", name=name))
             return
         self._show_train_more_dialog(name, entry)
 
     def _show_train_more_dialog(self, name: str, entry: ModelEntry):
         dialog = ctk.CTkToplevel(self)
-        dialog.title(f"Weiter trainieren: {name}")
+        dialog.title(self._tr("train_more_title", name=name))
         dialog.geometry("480x500")
         dialog.resizable(False, False)
         dialog.transient(self)
@@ -695,7 +696,7 @@ class MinecraftStructureApp(ctk.CTk):
         header.grid(row=0, column=0, sticky="ew", padx=20, pady=(20, 12))
         header.grid_columnconfigure(0, weight=1)
         icon = {"transformer": "⚡", "diffusion": "🌀", "transformer_diffusion": "🤖"}.get(entry.model_type, "📦")
-        ctk.CTkLabel(header, text=f"{icon} Weiter trainieren: {name}", font=("Segoe UI", 16, "bold")).grid(row=0, column=0, sticky="w")
+        ctk.CTkLabel(header, text=self._tr("train_more_header", icon=icon, name=name), font=("Segoe UI", 16, "bold")).grid(row=0, column=0, sticky="w")
 
         info_frame = ctk.CTkFrame(dialog, fg_color=("gray90", "gray15"), corner_radius=6)
         info_frame.grid(row=1, column=0, sticky="ew", padx=20, pady=(0, 16))
@@ -703,35 +704,36 @@ class MinecraftStructureApp(ctk.CTk):
         gs = f"{entry.grid_size[0]}×{entry.grid_size[1]}×{entry.grid_size[2]}"
         info_text = f"📐 {gs}  |  🏷️ {entry.model_type.upper()}"
         if entry.epochs_trained > 0:
-            info_text += f"\n📊 {entry.epochs_trained} Epochen  |  Loss: {entry.last_loss:.4f}"
+            info_text += f"\n📊 {entry.epochs_trained} {self._tr('epochs_label')}  |  Loss: {entry.last_loss:.4f}"
         ctk.CTkLabel(info_frame, text=info_text, font=("Segoe UI", 11), justify="left").grid(row=0, column=0, sticky="w", padx=14, pady=10)
 
         params = ctk.CTkFrame(dialog, fg_color="transparent")
         params.grid(row=2, column=0, sticky="ew", padx=20, pady=(0, 12))
         params.grid_columnconfigure(1, weight=1)
-        ctk.CTkLabel(params, text="Parameter:", font=("Segoe UI", 13, "bold")).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
+        ctk.CTkLabel(params, text=self._tr("params_label"), font=("Segoe UI", 13, "bold")).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
 
-        ctk.CTkLabel(params, text="Epochen:", font=("Segoe UI", 12)).grid(row=1, column=0, sticky="w", padx=(0, 12), pady=4)
+        ctk.CTkLabel(params, text=self._tr("tm_epochs"), font=("Segoe UI", 12)).grid(row=1, column=0, sticky="w", padx=(0, 12), pady=4)
         epochs_var = ctk.StringVar(value="10")
         ctk.CTkEntry(params, width=120, textvariable=epochs_var, font=("Segoe UI", 12)).grid(row=1, column=1, sticky="w", pady=4)
-        ctk.CTkLabel(params, text="Batch Size:", font=("Segoe UI", 12)).grid(row=2, column=0, sticky="w", padx=(0, 12), pady=4)
+        ctk.CTkLabel(params, text=self._tr("tm_batch_size"), font=("Segoe UI", 12)).grid(row=2, column=0, sticky="w", padx=(0, 12), pady=4)
         batch_var = ctk.StringVar(value="4")
         ctk.CTkEntry(params, width=120, textvariable=batch_var, font=("Segoe UI", 12)).grid(row=2, column=1, sticky="w", pady=4)
-        ctk.CTkLabel(params, text="Learning Rate:", font=("Segoe UI", 12)).grid(row=3, column=0, sticky="w", padx=(0, 12), pady=4)
+        ctk.CTkLabel(params, text=self._tr("tm_learning_rate"), font=("Segoe UI", 12)).grid(row=3, column=0, sticky="w", padx=(0, 12), pady=4)
         lr_var = ctk.StringVar(value="1.5e-3")
         ctk.CTkEntry(params, width=120, textvariable=lr_var, font=("Segoe UI", 12)).grid(row=3, column=1, sticky="w", pady=4)
 
-        ctk.CTkLabel(params, text="Vielfalt:", font=("Segoe UI", 12)).grid(row=4, column=0, sticky="w", padx=(0, 12), pady=4)
+        ctk.CTkLabel(params, text=self._tr("tm_diversity"), font=("Segoe UI", 12)).grid(row=4, column=0, sticky="w", padx=(0, 12), pady=4)
         aug_var = ctk.DoubleVar(value=1)
         aug_value = ctk.CTkLabel(params, text="1", width=28)
         ctk.CTkSlider(params, from_=0, to=5, number_of_steps=5, variable=aug_var,
                       command=lambda v: aug_value.configure(text=str(int(round(float(v)))))).grid(row=4, column=1, sticky="ew", pady=4)
         aug_value.grid(row=4, column=2, sticky="w", padx=(8, 0), pady=4)
-        aug_vertical_switch = ctk.CTkSwitch(params, text="Nach oben bewegen erlauben", onvalue=True, offvalue=False)
+        aug_vertical_switch = ctk.CTkSwitch(params, text=self._tr("allow_vertical"), onvalue=True, offvalue=False)
         aug_vertical_switch.grid(row=5, column=0, columnspan=3, sticky="w", pady=(4, 0))
 
         gpu_avail = torch.cuda.is_available() and self.config.gpu_enabled
-        ctk.CTkLabel(params, text=f"GPU: {'✅ CUDA verfügbar' if gpu_avail else '❌ CPU only'}",
+        gpu_text = f"GPU: {'✅ CUDA verfügbar' if gpu_avail else '❌ CPU only'}" if self.config.language == "de" else f"GPU: {'✅ CUDA available' if gpu_avail else '❌ CPU only'}"
+        ctk.CTkLabel(params, text=gpu_text,
                      font=("Segoe UI", 11), text_color="#34d399" if gpu_avail else "#f87171",
                      ).grid(row=6, column=0, columnspan=3, sticky="w", pady=(8, 0))
 
@@ -748,9 +750,9 @@ class MinecraftStructureApp(ctk.CTk):
                 aug = int(round(float(aug_var.get())))
                 allow_vertical = bool(aug_vertical_switch.get())
                 if epochs <= 0 or batch <= 0 or lr <= 0 or aug < 0:
-                    raise ValueError("Werte müssen positiv sein")
+                    raise ValueError(self._tr("values_must_be_positive"))
             except (ValueError, TypeError):
-                self.status_var.set("❌ Ungültige Trainingsparameter")
+                self.status_var.set(self._tr("status_invalid_params"))
                 return
             dialog.destroy()
             self._load_single_model(name)
@@ -767,19 +769,19 @@ class MinecraftStructureApp(ctk.CTk):
                 self.setting_aug_vertical.select()
             else:
                 self.setting_aug_vertical.deselect()
-            self.tab_view.set("🎯 Training")
+            self.tab_view.set(self._tr("tab_training"))
             self.after(300, lambda: self._start_training(entry.model_type))
 
-        ctk.CTkButton(btn_frame, text="🎯 Training starten", font=("Segoe UI", 13, "bold"),
+        ctk.CTkButton(btn_frame, text=self._tr("btn_start_training"), font=("Segoe UI", 13, "bold"),
                       height=36, fg_color="#7c3aed", hover_color="#6d28d9", command=on_start,
                      ).grid(row=0, column=0, sticky="ew", padx=(0, 4))
-        ctk.CTkButton(btn_frame, text="Abbrechen", font=("Segoe UI", 13), height=36,
+        ctk.CTkButton(btn_frame, text=self._tr("btn_cancel"), font=("Segoe UI", 13), height=36,
                       fg_color="gray40", hover_color="gray50", command=dialog.destroy,
                      ).grid(row=0, column=1, sticky="ew", padx=(4, 0))
         self._skin_widget_tree(dialog)
 
     def _rename_model_dialog(self, old_name: str):
-        dialog = ctk.CTkInputDialog(title="Modell umbenennen", text=f"Neuer Name für '{old_name}':")
+        dialog = ctk.CTkInputDialog(title=self._tr("rename_title"), text=self._tr("rename_prompt", old=old_name))
         new_name = dialog.get_input()
         if new_name and new_name.strip():
             new_name = new_name.strip()
@@ -795,16 +797,16 @@ class MinecraftStructureApp(ctk.CTk):
                     self.config.save()
                 self._refresh_models_tab()
                 self._refresh_model_combo()
-                self.status_var.set(f"✏️ {old_name} → {new_name}")
+                self.status_var.set(self._tr("status_model_renamed", old=old_name, new=new_name))
             else:
-                self.status_var.set(f"❌ Umbenennen fehlgeschlagen (existiert {new_name}?)")
+                self.status_var.set(self._tr("status_model_rename_failed", name=new_name))
 
     def _delete_model_confirm(self, name: str):
         entry = self.model_registry.get(name)
         if entry is None:
             return
         from tkinter.messagebox import askyesno
-        if askyesno("Modell löschen", f"🚨 Wirklich '{name}' löschen?\n\n{entry.path}"):
+        if askyesno(self._tr("delete_title"), self._tr("delete_confirm", name=name, path=entry.path)):
             self.model_registry.delete(name)
             if self.config.default_transformer_name == name:
                 self.config.default_transformer_name = None
@@ -815,7 +817,7 @@ class MinecraftStructureApp(ctk.CTk):
             self.config.save()
             self._refresh_models_tab()
             self._refresh_model_combo()
-            self.status_var.set(f"🗑 {name} gelöscht")
+            self.status_var.set(self._tr("status_model_deleted", name=name))
 
     # ═══════════════════════════════════════════════════════════════
     # TRAINING TAB
@@ -833,7 +835,7 @@ class MinecraftStructureApp(ctk.CTk):
         row = 0
 
         # ─── Model Type Selector ───
-        ctk.CTkLabel(scroll, text="🎯 Training", font=("Segoe UI", 20, "bold")).grid(
+        ctk.CTkLabel(scroll, text=self._tr("training_title"), font=("Segoe UI", 20, "bold")).grid(
             row=row, column=0, sticky="w", pady=(0, 12))
         row += 1
 
@@ -842,7 +844,7 @@ class MinecraftStructureApp(ctk.CTk):
         type_frame.grid_columnconfigure(1, weight=1)
         row += 1
 
-        ctk.CTkLabel(type_frame, text="Modell-Typ:", font=("Segoe UI", 14, "bold")).grid(
+        ctk.CTkLabel(type_frame, text=self._tr("model_type"), font=("Segoe UI", 14, "bold")).grid(
             row=0, column=0, padx=(0, 8), sticky="w")
         self.train_model_type_selector = ctk.CTkSegmentedButton(
             type_frame, values=["Transformer", "Diffusion", "TF-Diffusion"],
@@ -870,7 +872,7 @@ class MinecraftStructureApp(ctk.CTk):
         grid_frame.grid(row=row+2, column=0, sticky="ew", pady=(6, 6))
         grid_frame.grid_columnconfigure(1, weight=1)
 
-        ctk.CTkLabel(grid_frame, text="Grid-Größe:", font=("Segoe UI", 13, "bold")).grid(
+        ctk.CTkLabel(grid_frame, text=self._tr("grid_size"), font=("Segoe UI", 13, "bold")).grid(
             row=0, column=0, sticky="w", padx=(0, 12))
         self.grid_size_var = ctk.StringVar(value="16×16×16")
         self.grid_size_combo = ctk.CTkOptionMenu(
@@ -878,7 +880,7 @@ class MinecraftStructureApp(ctk.CTk):
             font=("Segoe UI", 12), width=200,
         )
         self.grid_size_combo.grid(row=0, column=1, sticky="w")
-        ctk.CTkLabel(grid_frame, text="🧱 96×96×96+ ist experimentell und nicht empfohlen zu nutzen.",
+        ctk.CTkLabel(grid_frame, text=self._tr("grid_experimental"),
                      font=("Segoe UI", 10), text_color=("gray50", "gray40")).grid(
             row=1, column=0, columnspan=2, sticky="w", pady=(2, 0))
 
@@ -886,7 +888,7 @@ class MinecraftStructureApp(ctk.CTk):
         sep2 = ctk.CTkFrame(scroll, height=2, fg_color=("gray70", "gray30"))
         sep2.grid(row=row+3, column=0, sticky="ew", pady=10)
 
-        ctk.CTkLabel(scroll, text="Training Parameter", font=("Segoe UI", 13, "bold")).grid(
+        ctk.CTkLabel(scroll, text=self._tr("training_params"), font=("Segoe UI", 13, "bold")).grid(
             row=row+4, column=0, sticky="w", pady=(0, 6))
 
         param_grid = ctk.CTkFrame(scroll, fg_color="transparent")
@@ -894,22 +896,22 @@ class MinecraftStructureApp(ctk.CTk):
         param_grid.grid_columnconfigure(1, weight=1)
         param_grid.grid_columnconfigure(3, weight=1)
 
-        ctk.CTkLabel(param_grid, text="Epochen:").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        ctk.CTkLabel(param_grid, text=self._tr("epochs")).grid(row=0, column=0, sticky="w", padx=(0, 8))
         self.train_epochs_entry = ctk.CTkEntry(param_grid, width=80)
         self.train_epochs_entry.grid(row=0, column=1, sticky="w")
         self.train_epochs_entry.insert(0, "10")
 
-        ctk.CTkLabel(param_grid, text="Batch Size:").grid(row=0, column=2, sticky="w", padx=(16, 8))
+        ctk.CTkLabel(param_grid, text=self._tr("batch_size")).grid(row=0, column=2, sticky="w", padx=(16, 8))
         self.train_batch_entry = ctk.CTkEntry(param_grid, width=80)
         self.train_batch_entry.grid(row=0, column=3, sticky="w")
         self.train_batch_entry.insert(0, "4")
 
-        ctk.CTkLabel(param_grid, text="Learning Rate:").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=(4, 0))
+        ctk.CTkLabel(param_grid, text=self._tr("learning_rate")).grid(row=1, column=0, sticky="w", padx=(0, 8), pady=(4, 0))
         self.train_lr_entry = ctk.CTkEntry(param_grid, width=80)
         self.train_lr_entry.grid(row=1, column=1, sticky="w", pady=(4, 0))
         self.train_lr_entry.insert(0, "1.5e-3")
 
-        ctk.CTkLabel(param_grid, text="Verschiebe-/Rotations-Vielfalt:").grid(
+        ctk.CTkLabel(param_grid, text=self._tr("aug_diversity")).grid(
             row=2, column=0, sticky="w", padx=(0, 8), pady=(8, 0))
         self.augmentation_diversity_var = ctk.DoubleVar(value=1)
         self.augmentation_diversity_slider = ctk.CTkSlider(
@@ -920,12 +922,12 @@ class MinecraftStructureApp(ctk.CTk):
         self.augmentation_diversity_label = ctk.CTkLabel(param_grid, text="1", width=28)
         self.augmentation_diversity_label.grid(row=2, column=3, sticky="w", pady=(8, 0))
 
-        self.setting_aug_vertical = ctk.CTkSwitch(param_grid, text="Nach oben bewegen erlauben",
+        self.setting_aug_vertical = ctk.CTkSwitch(param_grid, text=self._tr("allow_vertical"),
                                                   onvalue=True, offvalue=False)
         self.setting_aug_vertical.grid(row=3, column=0, columnspan=4, sticky="w", pady=(4, 0))
 
         # ── Air Weight ──
-        ctk.CTkLabel(param_grid, text="🏗️ Luft-Gewicht (50-100):").grid(
+        ctk.CTkLabel(param_grid, text=self._tr("air_weight")).grid(
             row=4, column=0, sticky="w", padx=(0, 8), pady=(8, 0))
         self.air_weight_var = ctk.DoubleVar(value=75.0)
         self.air_weight_slider = ctk.CTkSlider(param_grid, from_=50, to=100, number_of_steps=50,
@@ -933,7 +935,7 @@ class MinecraftStructureApp(ctk.CTk):
         self.air_weight_slider.grid(row=4, column=1, columnspan=2, sticky="ew", pady=(8, 0))
         self.air_weight_label = ctk.CTkLabel(param_grid, text="75", width=28)
         self.air_weight_label.grid(row=4, column=3, sticky="w", pady=(8, 0))
-        ctk.CTkLabel(param_grid, text="Wir empfehlen die Standard-Einstellung von 75 beizubehalten.",
+        ctk.CTkLabel(param_grid, text=self._tr("air_weight_hint"),
                      font=("Segoe UI", 9), text_color=("gray50", "gray40")).grid(
             row=5, column=0, columnspan=4, sticky="w", pady=(0, 4))
 
@@ -942,7 +944,7 @@ class MinecraftStructureApp(ctk.CTk):
         progress_frame.grid(row=row+6, column=0, sticky="ew", pady=(10, 2))
         progress_frame.grid_columnconfigure(1, weight=1)
 
-        ctk.CTkLabel(progress_frame, text="Fortschritt:", font=("Segoe UI", 13, "bold")).grid(row=0, column=0, sticky="w")
+        ctk.CTkLabel(progress_frame, text=self._tr("progress"), font=("Segoe UI", 13, "bold")).grid(row=0, column=0, sticky="w")
         self.train_batch_var = ctk.StringVar(value="")
         ctk.CTkLabel(progress_frame, textvariable=self.train_batch_var, font=("Segoe UI", 11),
                      fg_color=("gray90", "gray20"), corner_radius=4, padx=8, pady=2).grid(row=0, column=1, sticky="e")
@@ -972,30 +974,30 @@ class MinecraftStructureApp(ctk.CTk):
         btn_frame.grid(row=row+10, column=0, sticky="w", pady=10)
 
         self.train_btn_transformer = ctk.CTkButton(
-            btn_frame, text="🎯 Transformer trainieren", font=("Segoe UI", 12, "bold"),
+            btn_frame, text=self._tr("btn_train_transformer"), font=("Segoe UI", 12, "bold"),
             command=lambda: self._start_training("transformer"))
         self.train_btn_transformer.grid(row=0, column=0, padx=(0, 8))
 
         self.train_btn_diffusion = ctk.CTkButton(
-            btn_frame, text="🎯 Diffusion trainieren", font=("Segoe UI", 12, "bold"),
+            btn_frame, text=self._tr("btn_train_diffusion"), font=("Segoe UI", 12, "bold"),
             fg_color="#7c3aed", hover_color="#6d28d9",
             command=lambda: self._start_training("diffusion"))
         self.train_btn_diffusion.grid(row=0, column=1, padx=(0, 8))
 
         self.train_btn_tf_diffusion = ctk.CTkButton(
-            btn_frame, text="🤖 TF-Diffusion trainieren", font=("Segoe UI", 12, "bold"),
+            btn_frame, text=self._tr("btn_train_tf_diffusion"), font=("Segoe UI", 12, "bold"),
             fg_color="#c084fc", hover_color="#a855f7",
             command=lambda: self._start_tf_diffusion_training())
         self.train_btn_tf_diffusion.grid(row=0, column=2, padx=(0, 8))
 
         self.train_stop_btn = ctk.CTkButton(
-            btn_frame, text="⏹ Stop & Speichern", font=("Segoe UI", 12, "bold"),
+            btn_frame, text=self._tr("btn_stop_save"), font=("Segoe UI", 12, "bold"),
             fg_color="#dc2626", hover_color="#b91c1c", state="disabled",
             command=self._stop_training)
         self.train_stop_btn.grid(row=0, column=3, padx=(8, 0))
 
         self.kaggle_export_btn = ctk.CTkButton(
-            btn_frame, text="📤 Export to Kaggle", font=("Segoe UI", 12, "bold"),
+            btn_frame, text=self._tr("btn_kaggle_export"), font=("Segoe UI", 12, "bold"),
             fg_color="#dc2626", hover_color="#b91c1c",
             command=self._export_kaggle_dialog)
         self.kaggle_export_btn.grid(row=0, column=4, padx=(8, 0))
@@ -1016,35 +1018,35 @@ class MinecraftStructureApp(ctk.CTk):
         panel.grid_columnconfigure(1, weight=1)
 
         row = 0
-        ctk.CTkLabel(panel, text="🤖 TF-Diffusion — Einstellungen", font=("Segoe UI", 16, "bold"),
+        ctk.CTkLabel(panel, text=self._tr("tf_diffusion_settings"), font=("Segoe UI", 16, "bold"),
                      text_color="#c084fc").grid(row=row, column=0, columnspan=3, sticky="w", pady=(0, 10))
         row += 1
 
         # Encoder selection
-        ctk.CTkLabel(panel, text="🧠 Text Encoder:", font=("Segoe UI", 13, "bold")).grid(
+        ctk.CTkLabel(panel, text=self._tr("text_encoder"), font=("Segoe UI", 13, "bold")).grid(
             row=row, column=0, sticky="w", padx=(0, 8), pady=4)
         self.tf_encoder_combo = ctk.CTkOptionMenu(
             panel, values=list(MODEL_NAMES), font=("Segoe UI", 10),
             command=self._on_tf_encoder_change, width=160)
         self.tf_encoder_combo.grid(row=row, column=1, sticky="w", padx=(0, 8), pady=4)
         self.tf_encoder_combo.set("Phi-3.5-mini")
-        self.tf_encoder_status = ctk.CTkLabel(panel, text="⏳ Nicht geladen", font=("Segoe UI", 10),
+        self.tf_encoder_status = ctk.CTkLabel(panel, text=self._tr("encoder_not_loaded"), font=("Segoe UI", 10),
                                               fg_color=("gray90", "gray20"), corner_radius=4, padx=6, pady=2)
         self.tf_encoder_status.grid(row=row, column=2, sticky="ew", pady=4)
         row += 1
-        ctk.CTkButton(panel, text="📥 Encoder laden", font=("Segoe UI", 11, "bold"),
+        ctk.CTkButton(panel, text=self._tr("btn_load_encoder"), font=("Segoe UI", 11, "bold"),
                       fg_color="#2563eb", hover_color="#1d4ed8",
                       command=self._load_tf_encoder, height=28, width=140,
                      ).grid(row=row, column=0, columnspan=2, sticky="w", pady=4)
         row += 1
 
         # ─── Hidden State Cache Section ───
-        ctk.CTkLabel(panel, text="💾 Pre-Computed Hidden States", font=("Segoe UI", 13, "bold"),
+        ctk.CTkLabel(panel, text=self._tr("hidden_states"), font=("Segoe UI", 13, "bold"),
                      text_color="#34d399").grid(row=row, column=0, columnspan=3, sticky="w", pady=(8, 4))
         row += 1
         self.tf_use_cached_hs_var = ctk.BooleanVar(value=False)
         self.tf_use_cached_hs_switch = ctk.CTkSwitch(
-            panel, text="Pre-Computed Hidden States verwenden (schneller)",
+            panel, text=self._tr("use_cached_hs"),
             variable=self.tf_use_cached_hs_var, onvalue=True, offvalue=False,
             command=self._on_cached_hs_toggle,
         )
@@ -1055,10 +1057,10 @@ class MinecraftStructureApp(ctk.CTk):
         cache_sel_frame = ctk.CTkFrame(panel, fg_color="transparent")
         cache_sel_frame.grid(row=row, column=0, columnspan=3, sticky="ew", pady=2)
         cache_sel_frame.grid_columnconfigure(1, weight=1)
-        ctk.CTkLabel(cache_sel_frame, text="Cache auswählen:", font=("Segoe UI", 11)).grid(
+        ctk.CTkLabel(cache_sel_frame, text=self._tr("select_cache"), font=("Segoe UI", 11)).grid(
             row=0, column=0, sticky="w", padx=(0, 6))
         self.tf_cache_selector = ctk.CTkOptionMenu(
-            cache_sel_frame, values=["(kein Cache)"], font=("Segoe UI", 10),
+            cache_sel_frame, values=[self._tr("no_cache")], font=("Segoe UI", 10),
             command=self._on_cache_selection_change, width=160)
         self.tf_cache_selector.grid(row=0, column=1, sticky="w")
         ctk.CTkButton(cache_sel_frame, text="🔄", font=("Segoe UI", 10),
@@ -1066,7 +1068,7 @@ class MinecraftStructureApp(ctk.CTk):
                       command=self._refresh_cache_list).grid(row=0, column=2, padx=(4, 0))
         row += 1
 
-        self.tf_cache_status_label = ctk.CTkLabel(panel, text="⏳ Kein Cache geladen",
+        self.tf_cache_status_label = ctk.CTkLabel(panel, text=self._tr("no_cache_loaded"),
                                                    font=("Segoe UI", 10),
                                                    fg_color=("gray90", "gray20"),
                                                    corner_radius=4, padx=6, pady=2)
@@ -1074,18 +1076,18 @@ class MinecraftStructureApp(ctk.CTk):
         row += 1
         cache_btn_frame = ctk.CTkFrame(panel, fg_color="transparent")
         cache_btn_frame.grid(row=row, column=0, columnspan=3, sticky="w", pady=2)
-        ctk.CTkButton(cache_btn_frame, text="📥 Vorberechnen", font=("Segoe UI", 10, "bold"),
+        ctk.CTkButton(cache_btn_frame, text=self._tr("btn_precompute"), font=("Segoe UI", 10, "bold"),
                       fg_color="#059669", hover_color="#047857",
                       command=self._precompute_hidden_states, height=26, width=120,
                      ).grid(row=0, column=0, padx=(0, 4))
-        ctk.CTkButton(cache_btn_frame, text="🔍 Cache prüfen", font=("Segoe UI", 10),
+        ctk.CTkButton(cache_btn_frame, text=self._tr("btn_check_cache"), font=("Segoe UI", 10),
                       fg_color="#334155", hover_color="#475569",
                       command=self._check_cache_status, height=26, width=110,
                      ).grid(row=0, column=1, padx=4)
         row += 1
 
         # UNet Presets
-        ctk.CTkLabel(panel, text="🏗️ UNet-Preset:", font=("Segoe UI", 13, "bold")).grid(
+        ctk.CTkLabel(panel, text=self._tr("unet_preset"), font=("Segoe UI", 13, "bold")).grid(
             row=row, column=0, columnspan=3, sticky="w", pady=(10, 4))
         row += 1
         self.tf_preset_var = ctk.StringVar(value="🐣 Tiny (0.5M)")
@@ -1099,7 +1101,7 @@ class MinecraftStructureApp(ctk.CTk):
         row += 1
 
         # TF-Diffusion Diff steps
-        ctk.CTkLabel(panel, text="Diffusion Steps:", font=("Segoe UI", 12)).grid(
+        ctk.CTkLabel(panel, text=self._tr("diff_steps"), font=("Segoe UI", 12)).grid(
             row=row, column=0, sticky="w", padx=(0, 8), pady=4)
         self.tf_diff_steps_entry = ctk.CTkEntry(panel, width=80)
         self.tf_diff_steps_entry.grid(row=row, column=1, sticky="w", pady=4)
@@ -1133,12 +1135,12 @@ class MinecraftStructureApp(ctk.CTk):
         panel.grid_columnconfigure(1, weight=1)
 
         row = 0
-        ctk.CTkLabel(panel, text="⚡ Transformer — Einstellungen", font=("Segoe UI", 16, "bold"),
+        ctk.CTkLabel(panel, text=self._tr("transformer_settings"), font=("Segoe UI", 16, "bold"),
                      text_color="#60a5fa").grid(row=row, column=0, columnspan=3, sticky="w", pady=(0, 10))
         row += 1
 
         # Modellgröße presets
-        ctk.CTkLabel(panel, text="Modellgröße (Parameter):", font=("Segoe UI", 13, "bold")).grid(
+        ctk.CTkLabel(panel, text=self._tr("model_size"), font=("Segoe UI", 13, "bold")).grid(
             row=row, column=0, columnspan=3, sticky="w", pady=(0, 6))
         row += 1
         preset_frame = ctk.CTkFrame(panel, fg_color="transparent")
@@ -1156,7 +1158,7 @@ class MinecraftStructureApp(ctk.CTk):
         self.size_slider.grid(row=row, column=0, columnspan=3, sticky="ew", pady=(4, 2))
         row += 1
 
-        self.params_info_var = ctk.StringVar(value="🔍 Ziel: 3.9M Parameter → Architektur wird berechnet...")
+        self.params_info_var = ctk.StringVar(value=self._tr("target_arch", val=3.9, params=0, d_model=0, nhead=0, layers=0, ffn=0))
         self.params_info_label = ctk.CTkLabel(panel, textvariable=self.params_info_var, font=("Segoe UI", 11),
                                               justify="left", fg_color=("gray90", "gray20"),
                                               corner_radius=6, padx=10, pady=6)
@@ -1164,7 +1166,7 @@ class MinecraftStructureApp(ctk.CTk):
         row += 1
 
         self.show_advanced = False
-        self.advanced_btn = ctk.CTkButton(panel, text="▶ Advanced Settings", font=("Segoe UI", 11),
+        self.advanced_btn = ctk.CTkButton(panel, text=self._tr("btn_advanced"), font=("Segoe UI", 11),
                                           width=180, height=28, fg_color="#334155", hover_color="#475569",
                                           command=self._toggle_advanced)
         self.advanced_btn.grid(row=row, column=0, sticky="w", pady=(4, 2))
@@ -1178,10 +1180,10 @@ class MinecraftStructureApp(ctk.CTk):
         self.adv_vars = {}
         self.adv_entries = {}
         labels_adv = [
-            ("d_model (Modell-Dimension)", "d_model", 64, 1024, 1, 192),
-            ("nhead (Attention Heads)", "nhead", 2, 16, 1, 6),
-            ("Layers (Decoder-Ebenen)", "layers", 2, 24, 1, 5),
-            ("FFN Multiplikator", "ff_ratio", 2, 6, 1, 4),
+            (self._tr("adv_d_model"), "d_model", 64, 1024, 1, 192),
+            (self._tr("adv_nhead"), "nhead", 2, 16, 1, 6),
+            (self._tr("adv_layers"), "layers", 2, 24, 1, 5),
+            (self._tr("adv_ff_ratio"), "ff_ratio", 2, 6, 1, 4),
         ]
         for r, (label, key, lo, hi, step, default) in enumerate(labels_adv):
             ctk.CTkLabel(self.advanced_frame, text=label, font=("Segoe UI", 11)).grid(
@@ -1192,7 +1194,7 @@ class MinecraftStructureApp(ctk.CTk):
             self.adv_vars[key] = var
             self.adv_entries[key] = entry
             var.trace_add("write", lambda *_: self._update_arch_from_advanced())
-        ctk.CTkButton(self.advanced_frame, text="↻ Berechnen", font=("Segoe UI", 10), width=100, height=26,
+        ctk.CTkButton(self.advanced_frame, text=self._tr("btn_calculate"), font=("Segoe UI", 10), width=100, height=26,
                       command=self._update_arch_from_advanced).grid(row=4, column=0, padx=8, pady=4, sticky="w")
 
         self.transformer_panel = panel  # save reference
@@ -1205,26 +1207,23 @@ class MinecraftStructureApp(ctk.CTk):
         panel.grid_columnconfigure(1, weight=1)
 
         row = 0
-        ctk.CTkLabel(panel, text="🌀 Diffusion — Einstellungen", font=("Segoe UI", 16, "bold"),
+        ctk.CTkLabel(panel, text=self._tr("diffusion_settings"), font=("Segoe UI", 16, "bold"),
                      text_color="#a78bfa").grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 10))
         row += 1
 
-        ctk.CTkLabel(panel, text="Diffusion verwendet feste Architektur:\n"
-                                 "d_model=128, d_text=64, channels=64, (1,2,2)",
+        ctk.CTkLabel(panel, text=self._tr("diffusion_fixed_arch"),
                      font=("Segoe UI", 11), text_color=("gray50", "gray40"), justify="left").grid(
             row=row, column=0, columnspan=2, sticky="w", pady=(0, 8))
         row += 1
 
-        ctk.CTkLabel(panel, text="Diffusion Steps:", font=("Segoe UI", 12)).grid(
+        ctk.CTkLabel(panel, text=self._tr("diff_steps"), font=("Segoe UI", 12)).grid(
             row=row, column=0, sticky="w", padx=(0, 8), pady=4)
         self.diff_train_steps_entry = ctk.CTkEntry(panel, width=80)
         self.diff_train_steps_entry.grid(row=row, column=1, sticky="w", pady=4)
         self.diff_train_steps_entry.insert(0, "50")
         row += 1
 
-        ctk.CTkLabel(panel, text="Standard-Parameter (Grid, Epochen, Batch, LR,\n"
-                                 "Augmentation) werden von den gemeinsamen\n"
-                                 "Eingaben oben übernommen.",
+        ctk.CTkLabel(panel, text=self._tr("diffusion_shared_params"),
                      font=("Segoe UI", 11), text_color=("gray50", "gray40"), justify="left").grid(
             row=row, column=0, columnspan=2, sticky="w", pady=(4, 0))
         self.diffusion_panel = panel  # save reference
@@ -1268,15 +1267,15 @@ class MinecraftStructureApp(ctk.CTk):
             "d_model": d_model,
             "cross_attn_heads": ca_heads,
         }
-        self.status_var.set(f"✅ UNet Preset: {label}")
+        self.status_var.set(self._tr("status_unet_preset", label=label))
 
     def _on_tf_encoder_change(self, value: str):
-        self.tf_encoder_status.configure(text=f"⏳ {value} - noch nicht geladen")
+        self.tf_encoder_status.configure(text=self._tr("encoder_not_loaded_yet", name=value))
 
     def _load_tf_encoder(self):
         model_name = self.tf_encoder_combo.get()
-        self.tf_encoder_status.configure(text=f"⏳ Lade {model_name}...")
-        self.status_var.set(f"⏳ Lade {model_name}...")
+        self.tf_encoder_status.configure(text=self._tr("status_encoder_loading", name=model_name))
+        self.status_var.set(self._tr("status_encoder_loading", name=model_name))
         threading.Thread(target=self._load_tf_encoder_worker, args=(model_name,), daemon=True).start()
 
     def _load_tf_encoder_worker(self, model_name: str):
@@ -1286,45 +1285,45 @@ class MinecraftStructureApp(ctk.CTk):
             encoder = FrozenTransformerEncoder(model_name=model_name, device=device, dtype=dtype)
             self.tf_encoder = encoder
             self.after(0, lambda: self.tf_encoder_status.configure(
-                text=f"✅ {model_name} geladen (dim={encoder.hidden_dim}, frozen)"))
-            self.after(0, lambda: self.status_var.set(f"✅ {model_name} geladen"))
+                text=self._tr("encoder_loaded_info", name=model_name, dim=encoder.hidden_dim)))
+            self.after(0, lambda: self.status_var.set(self._tr("status_encoder_loaded", name=model_name)))
         except Exception as exc:
             err_msg = str(exc)
             self.after(0, lambda m=err_msg: self.tf_encoder_status.configure(
-                text=f"❌ Fehler: {m[:60]}"))
-            self.after(0, lambda m=err_msg: self.status_var.set(f"❌ Encoder Fehler: {m[:40]}"))
+                text=self._tr("cache_error", msg=m[:60])))
+            self.after(0, lambda m=err_msg: self.status_var.set(self._tr("status_encoder_error", msg=m[:40])))
 
     def _start_tf_diffusion_training(self):
         if self.training_running:
             return
         use_cached = self.tf_use_cached_hs_var.get()
         if not use_cached and self.tf_encoder is None:
-            self.status_var.set("❌ Bitte zuerst den Text Encoder laden oder Pre-Computed HS aktivieren")
+            self.status_var.set(self._tr("status_no_encoder"))
             return
         if use_cached:
             cache_sel = self.tf_cache_selector.get()
-            if cache_sel == "(kein Cache)":
-                self.status_var.set("❌ Bitte einen Cache auswählen")
+            if cache_sel == self._tr("no_cache"):
+                self.status_var.set(self._tr("status_no_cache"))
                 return
             # Validate cache exists
             encoder_name = cache_sel
             schem_files, txt_files = self._get_training_schem_files()
             result = validate_cache(encoder_name, schem_files, txt_files)
             if not result["valid"]:
-                self.status_var.set(f"❌ Cache nicht aktuell: {result['message']}")
+                self.status_var.set(self._tr("status_cache_invalid", msg=result['message']))
                 return
         self.training_running = True
         self.tf_progress_bar.set(0)
         self.train_btn_tf_diffusion.configure(state="disabled")
         self.train_stop_btn.configure(state="normal")
-        mode = "mit Pre-Computed HS" if use_cached else "mit Encoder"
-        self.status_var.set(f"⏳ TF-Diffusion Training gestartet ({mode})...")
+        mode = self._tr("with_cached_hs") if use_cached else self._tr("with_encoder")
+        self.status_var.set(self._tr("status_tf_training_started", mode=mode))
         threading.Thread(target=self._tf_diffusion_training_worker, daemon=True).start()
 
     def _refresh_cache_list(self):
         """Refresh the cache selector dropdown with available caches."""
         caches = list_caches()
-        names = [c["encoder_name"] for c in caches] if caches else ["(kein Cache)"]
+        names = [c["encoder_name"] for c in caches] if caches else [self._tr("no_cache")]
         current = self.tf_cache_selector.get()
         self.tf_cache_selector.configure(values=names)
         if current in names:
@@ -1337,8 +1336,8 @@ class MinecraftStructureApp(ctk.CTk):
 
     def _on_cache_selection_change(self, value: str):
         """Called when the user selects a different cache."""
-        if value == "(kein Cache)":
-            self.tf_cache_status_label.configure(text="⏳ Kein Cache ausgewählt")
+        if value == self._tr("no_cache"):
+            self.tf_cache_status_label.configure(text=self._tr("no_cache_selected"))
             return
         # Show cache info
         schem_files, txt_files = self._get_training_schem_files()
@@ -1473,17 +1472,17 @@ class MinecraftStructureApp(ctk.CTk):
                     if batch_num % max(1, total_batches // 10) == 0 or batch_num == total_batches:
                         self.after(0, lambda bp=batch_num/total_batches, bn=batch_num, tb=total_batches: (
                             self.tf_progress_bar.set(bp),
-                            self.tf_progress_label.configure(text=f"Batch {bn}/{tb}"),
+                            self.tf_progress_label.configure(text=self._tr("batch_progress", bn=bn, tb=tb)),
                         ))
                 avg_loss = total_loss / max(total_batches, 1)
                 elapsed = time.time() - total_start
-                self.after(0, lambda e=epoch, l=avg_loss, p=epoch/epochs: (
+                self.after(0, lambda e=epoch, l=avg_loss, p=epoch/epochs, el=elapsed: (
                     self.tf_progress_bar.set(p),
-                    self.tf_progress_label.configure(text=f"Epoche {e}/{epochs}, Loss={l:.4f}"),
-                    self.tf_loss_var.set(f"Loss: {l:.4f} | Zeit: {elapsed:.0f}s"),
+                    self.tf_progress_label.configure(text=self._tr("tf_epoch_progress", e=e, epochs=epochs, loss=f"{l:.4f}")),
+                    self.tf_loss_var.set(self._tr("loss_time", loss=f"{l:.4f}", time=f"{el:.0f}")),
                     self.train_epoch_bar.set(p),
-                    self.train_epoch_label.configure(text=f"TF-Diffusion Epoche {e}/{epochs}, Loss={l:.4f}"),
-                    self.train_loss_var.set(f"TF-Diffusion | Loss: {l:.4f} | Zeit: {elapsed:.0f}s"),
+                    self.train_epoch_label.configure(text=self._tr("tf_epoch_progress", e=e, epochs=epochs, loss=f"{l:.4f}")),
+                    self.train_loss_var.set(self._tr("tf_loss_time", loss=f"{l:.4f}", time=f"{el:.0f}")),
                 ))
                 torch.save({"model_state": model.state_dict(), "grid_size": grid_size,
                             "block_vocab_size": model.num_blocks, "num_blocks": model.num_blocks,
@@ -1497,13 +1496,13 @@ class MinecraftStructureApp(ctk.CTk):
                             "allow_vertical_movement": allow_vertical,
                             "epoch": epoch, "loss": avg_loss,
                            }, out_dir / "model.pt")
-            self.after(0, lambda: self.status_var.set("✅ Transformer Diffusion Training abgeschlossen"))
+            self.after(0, lambda: self.status_var.set(self._tr("status_tf_diffusion_done")))
             self.after(0, self._discover_models)
             self.after(0, self._refresh_models_tab)
         except Exception as e:
             import traceback
             traceback.print_exc()
-            self.after(0, lambda msg=str(e)[:100]: self.tf_loss_var.set(f"❌ Fehler: {msg}"))
+            self.after(0, lambda msg=str(e)[:100]: self.tf_loss_var.set(self._tr("tf_error", msg=msg)))
         finally:
             self.training_running = False
             self.after(0, lambda: self.train_btn_tf_diffusion.configure(state="normal"))
@@ -1522,7 +1521,7 @@ class MinecraftStructureApp(ctk.CTk):
         left.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
         left.grid_rowconfigure(1, weight=1)
         left.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(left, text="📂 Gespeicherte Projekte", font=("Segoe UI", 16, "bold")).grid(row=0, column=0, sticky="w", pady=10, padx=10)
+        ctk.CTkLabel(left, text=self._tr("saved_projects"), font=("Segoe UI", 16, "bold")).grid(row=0, column=0, sticky="w", pady=10, padx=10)
         self.project_listbox = ctk.CTkTextbox(left, font=("Segoe UI", 12), state="disabled")
         self.project_listbox.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 10))
         btn_frame = ctk.CTkFrame(left, fg_color="transparent")
@@ -1530,19 +1529,19 @@ class MinecraftStructureApp(ctk.CTk):
         btn_frame.grid_columnconfigure(0, weight=1)
         btn_frame.grid_columnconfigure(1, weight=1)
         btn_frame.grid_columnconfigure(2, weight=1)
-        ctk.CTkButton(btn_frame, text="↻ Neu laden", command=self._refresh_projects).grid(row=0, column=0, padx=2)
-        ctk.CTkButton(btn_frame, text="▶️ Laden", command=self._load_selected_project).grid(row=0, column=1, padx=2)
-        ctk.CTkButton(btn_frame, text="🗑 Löschen", fg_color="#dc2626", hover_color="#b91c1c",
+        ctk.CTkButton(btn_frame, text=self._tr("btn_reload"), command=self._refresh_projects).grid(row=0, column=0, padx=2)
+        ctk.CTkButton(btn_frame, text=self._tr("btn_load_project"), command=self._load_selected_project).grid(row=0, column=1, padx=2)
+        ctk.CTkButton(btn_frame, text=self._tr("btn_delete_project"), fg_color="#dc2626", hover_color="#b91c1c",
                       command=self._delete_selected_project).grid(row=0, column=2, padx=2)
         right = ctk.CTkFrame(tab, corner_radius=10)
         right.grid(row=0, column=1, sticky="nsew")
         right.grid_rowconfigure(3, weight=1)
         right.grid_columnconfigure(0, weight=1)
-        self.project_info = ctk.CTkLabel(right, text="Wähle ein Projekt aus der Liste", font=("Segoe UI", 14), justify="left")
+        self.project_info = ctk.CTkLabel(right, text=self._tr("select_project"), font=("Segoe UI", 14), justify="left")
         self.project_info.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
         self.project_preview = ctk.CTkLabel(right, text="")
         self.project_preview.grid(row=1, column=0, padx=10, pady=4)
-        ctk.CTkButton(right, text="📤 Exportieren als .schem", font=("Segoe UI", 13),
+        ctk.CTkButton(right, text=self._tr("btn_export_project"), font=("Segoe UI", 13),
                       command=self._export_selected_project).grid(row=2, column=0, pady=10, padx=10)
 
     # ═══════════════════════════════════════════════════════════════
@@ -1592,23 +1591,23 @@ class MinecraftStructureApp(ctk.CTk):
         frame.grid_columnconfigure(0, weight=1)
         grid_sizes = " · ".join(GRID_SIZE_OPTIONS)
         info = [
-            f"🏗️ {APP_NAME} v{VERSION}", "",
-            "Ein KI-gestützter Minecraft Struktur Generator", "",
-            "🚀 Features:",
-            "  • 🤖 Transformer Diffusion (Hauptmodell)",
-            "     - Frozen pre-trained Text Encoder (Phi-3.5, Gemma 2/3, Flan-T5)",
-            "     - Cross-Attention statt Average Pooling",
-            "     - 3D UNet mit diskreter Denoising Diffusion",
-            "  • ⚡ Transformer Modell (Single-Pass)",
-            "  • 🌀 3D Diffusion Modell (diskrete Denoising)",
-            "  • 3D Voxel-Vorschau (frei drehbar mit Maus, zoombar)",
-            "  • Text-zu-Struktur Generierung",
-            "  • Modell-Manager (mehrere Versionen, Default, Train More)",
-            "  • Projekt-Management mit Speichern & Export",
-            "  • GPU-beschleunigtes Training", "",
-            f"📊 Trainingsdaten: gut analysierte + ausgelagerte Strukturen",
-            f"🎯 Verfügbare Grid-Größen: {grid_sizes}", "",
-            "Erstellt mit PyTorch, CustomTkinter & viel ❤️",
+            self._tr("about_title", name=APP_NAME, version=VERSION), "",
+            self._tr("about_ai_generator"), "",
+            self._tr("about_features"),
+            self._tr("about_tf_diffusion"),
+            self._tr("about_frozen_encoder"),
+            self._tr("about_cross_attn"),
+            self._tr("about_3d_unet"),
+            self._tr("about_transformer"),
+            self._tr("about_diffusion"),
+            self._tr("about_3d_preview"),
+            self._tr("about_text_to_struct"),
+            self._tr("about_model_manager"),
+            self._tr("about_project_mgmt"),
+            self._tr("about_gpu_training"), "",
+            self._tr("about_training_data"),
+            self._tr("about_grid_sizes", sizes=grid_sizes), "",
+            self._tr("about_created_with"),
         ]
         ctk.CTkLabel(frame, text="\n".join(info), font=("Segoe UI", 13), justify="left").grid(row=0, column=0, sticky="w", padx=20, pady=20)
 
@@ -1622,7 +1621,7 @@ class MinecraftStructureApp(ctk.CTk):
     def _refresh_model_combo(self):
         self.model_registry.discover()
         models = self.model_registry.get_by_type(self.model_type)
-        names = [m.name for m in models] if models else ["(keine)"]
+        names = [m.name for m in models] if models else [self._tr("none")]
         current = ""
         if self.model_type == "transformer" and self.current_transformer_name:
             current = self.current_transformer_name
@@ -1636,14 +1635,14 @@ class MinecraftStructureApp(ctk.CTk):
                        else self.model_registry.default_tf_diffusion)
             if default and default in names:
                 current = default
-        self.model_version_combo.configure(values=names if names else ["(keine)"])
+        self.model_version_combo.configure(values=names if names else [self._tr("none")])
         if current:
             try:
                 self.model_version_combo.set(current)
             except Exception:
-                self.model_version_combo.set(names[0] if names else "(keine)")
+                self.model_version_combo.set(names[0] if names else self._tr("none"))
         else:
-            self.model_version_combo.set(names[0] if names else "(keine)")
+            self.model_version_combo.set(names[0] if names else self._tr("none"))
 
     def _on_model_type_change(self, value: str):
         if value == "TF-Diffusion":
@@ -1657,7 +1656,7 @@ class MinecraftStructureApp(ctk.CTk):
         self._load_models_async()
 
     def _on_model_version_change(self, value: str):
-        if value == "(keine)":
+        if value == self._tr("none"):
             return
         if self.model_type == "transformer":
             self.current_transformer_name = value
@@ -1672,7 +1671,7 @@ class MinecraftStructureApp(ctk.CTk):
     # ═══════════════════════════════════════════════════════════════
 
     def _load_models_async(self):
-        self.model_status.configure(text="⏳ Lade Modelle...")
+        self.model_status.configure(text=self._tr("status_loading_models"))
         threading.Thread(target=self._load_models, daemon=True).start()
 
     def _load_models(self):
@@ -1778,9 +1777,9 @@ class MinecraftStructureApp(ctk.CTk):
                     loaded_any = True
                     msg_parts.append(f"✅ Diffusion ({df_name})")
 
-            status = " | ".join(msg_parts) if loaded_any else "⚠️ Kein Modell geladen"
+            status = " | ".join(msg_parts) if loaded_any else self._tr("status_no_model")
         except Exception as e:
-            status = f"❌ Fehler: {str(e)[:60]}"
+            status = self._tr("gen_error", error=str(e)[:60])
             self.transformer_model = None
             self.diffusion_model = None
             self.tf_diffusion_model = None
@@ -1801,12 +1800,12 @@ class MinecraftStructureApp(ctk.CTk):
             return
         prompt = self.prompt_text.get("1.0", "end-1c").strip()
         if not prompt:
-            self.status_var.set("❌ Bitte Prompt eingeben")
+            self.status_var.set(self._tr("status_enter_prompt"))
             return
         self.generation_running = True
-        self.generate_btn.configure(state="disabled", text="⏳ Generiere...")
+        self.generate_btn.configure(state="disabled", text=self._tr("btn_generating"))
         self.progress_bar.start()
-        self.status_var.set("⏳ Generiere Struktur...")
+        self.status_var.set(self._tr("status_generating"))
         threading.Thread(target=self._generate_worker, args=(prompt,), daemon=True).start()
 
     def _generate_worker(self, prompt: str):
@@ -1820,14 +1819,14 @@ class MinecraftStructureApp(ctk.CTk):
                 grid = self.transformer_model.generate(prompt_ids, temperature=temp, top_k=topk)[0].cpu()
                 self.id_to_block = self.voxel_tokenizer.id_to_block
                 gs = grid.shape
-                info = f"✅ Transformer Generierung abgeschlossen\n📐 {gs[0]}×{gs[1]}×{gs[2]} Voxels\n⚙️ Temp={temp:.2f}, Top-K={topk}\n📝 Prompt: \"{prompt[:60]}...\""
+                info = self._tr("gen_transformer_done", x=gs[0], y=gs[1], z=gs[2], temp=f"{temp:.2f}", topk=topk, prompt=prompt[:60])
             elif self.model_type == "diffusion" and self.diffusion_model is not None:
                 num_steps = int(self.diff_steps_slider.get())
                 prompt_ids = self.prompt_tokenizer.encode(prompt).unsqueeze(0).to(device)
                 grid = self.diffusion_model.sample(prompt_ids, num_steps=num_steps, temperature=temp)[0].cpu()
                 self.id_to_block = self.voxel_tokenizer.id_to_block
                 gs = grid.shape
-                info = f"✅ Diffusion Generierung abgeschlossen\n📐 {gs[0]}×{gs[1]}×{gs[2]} Voxels\n⚙️ Temp={temp:.2f}, Steps={num_steps}\n📝 Prompt: \"{prompt[:60]}...\""
+                info = self._tr("gen_diffusion_done", x=gs[0], y=gs[1], z=gs[2], temp=f"{temp:.2f}", steps=num_steps, prompt=prompt[:60])
             elif self.model_type == "transformer_diffusion" and self.tf_diffusion_model is not None and self.tf_encoder is not None:
                 num_steps = int(self.diff_steps_slider.get())
                 with torch.no_grad():
@@ -1840,11 +1839,9 @@ class MinecraftStructureApp(ctk.CTk):
                                                       temperature=temp, top_k=topk)[0].cpu()
                 self.id_to_block = self.voxel_tokenizer.id_to_block
                 gs = grid.shape
-                info = (f"✅ TF-Diffusion Generierung abgeschlossen\n📐 {gs[0]}×{gs[1]}×{gs[2]} Voxels\n"
-                        f"⚙️ Temp={temp:.2f}, Top-K={topk}, Steps={num_steps}\n"
-                        f"🧠 Encoder: {self.tf_encoder.display_name}\n📝 Prompt: \"{prompt[:60]}...\"")
+                info = self._tr("gen_tf_diffusion_done", x=gs[0], y=gs[1], z=gs[2], temp=f"{temp:.2f}", topk=topk, steps=num_steps, encoder=self.tf_encoder.display_name, prompt=prompt[:60])
             else:
-                self.after(0, self._generation_failed, "⚠️ Kein passendes Modell geladen")
+                self.after(0, self._generation_failed, self._tr("gen_no_model"))
                 return
             raw_shape = tuple(int(v) for v in grid.shape)
             trimmed_grid = trim_token_grid(grid, air_id=0)
@@ -1853,13 +1850,13 @@ class MinecraftStructureApp(ctk.CTk):
             self.generated_np = preview_grid.numpy()
             trimmed_shape = tuple(int(v) for v in trimmed_grid.shape)
             unique_blocks = int(torch.unique(trimmed_grid).numel())
-            info += f"\n🧱 {unique_blocks} Blocktypen nach Trim"
+            info += "\n" + self._tr("gen_block_types", count=unique_blocks)
             unsaved_mask = (trimmed_grid < 0) | (trimmed_grid >= len(self.id_to_block))
             unsaved_count = int(unsaved_mask.sum().item())
             if unsaved_count:
-                info += f"\n⚠️ {unsaved_count} Blöcke nicht im Vokabular: in der Vorschau mit ! markiert"
+                info += "\n" + self._tr("gen_unsaved_blocks", count=unsaved_count)
             if trimmed_shape != raw_shape:
-                info += f"\nTrim: {raw_shape[0]}x{raw_shape[1]}x{raw_shape[2]} -> {trimmed_shape[0]}x{trimmed_shape[1]}x{trimmed_shape[2]}"
+                info += "\n" + self._tr("gen_trim", rx=raw_shape[0], ry=raw_shape[1], rz=raw_shape[2], tx=trimmed_shape[0], ty=trimmed_shape[1], tz=trimmed_shape[2])
             self.after(0, self._generation_done, info)
         except Exception as e:
             self.after(0, self._generation_failed, str(e))
@@ -1867,12 +1864,12 @@ class MinecraftStructureApp(ctk.CTk):
     def _generation_done(self, info: str):
         self.progress_bar.stop()
         self.progress_bar.set(1)
-        self.generate_btn.configure(state="normal", text="✦ Generieren")
+        self.generate_btn.configure(state="normal", text=self._tr("btn_generate"))
         self.save_btn.configure(state="normal")
         self.export_btn.configure(state="normal")
         self.viewer_btn.configure(state="normal" if HAS_PYGLET else "disabled")
         self.info_var.set(info)
-        self.status_var.set("✅ Fertig")
+        self.status_var.set(self._tr("status_done"))
         self.generation_running = False
         self._update_preview()
         self.current_project_path = None
@@ -1880,16 +1877,16 @@ class MinecraftStructureApp(ctk.CTk):
     def _generation_failed(self, error: str):
         self.progress_bar.stop()
         self.progress_bar.set(0)
-        self.generate_btn.configure(state="normal", text="✦ Generieren")
-        self.info_var.set(f"❌ Fehler: {error}")
-        self.status_var.set(f"❌ {error}")
+        self.generate_btn.configure(state="normal", text=self._tr("btn_generate"))
+        self.info_var.set(self._tr("gen_error", error=error))
+        self.status_var.set(self._tr("gen_error", error=error))
         self.generation_running = False
 
     def _open_3d_viewer(self):
         if self.generated_np is None or self.id_to_block is None:
             return
         if not HAS_PYGLET:
-            self.status_var.set("❌ pyglet nicht installiert")
+            self.status_var.set(self._tr("status_pyglet_missing"))
             return
         open_3d_viewer(self.generated_np, self.id_to_block, f"Minecraft 3D - {self.model_type.upper()} Generierung")
 
@@ -1970,7 +1967,7 @@ class MinecraftStructureApp(ctk.CTk):
         (proj_dir / "metadata.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
         (proj_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
         self.current_project_path = proj_dir
-        self.status_var.set(f"💾 Projekt gespeichert: {proj_dir.name}")
+        self.status_var.set(self._tr("status_project_saved", name=proj_dir.name))
         self._refresh_projects()
 
     def _export_schematic(self):
@@ -1982,7 +1979,7 @@ class MinecraftStructureApp(ctk.CTk):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         path = EXPORTS_DIR / f"{safe}_{timestamp}.schem"
         save_schem(path, self.generated_grid, self.id_to_block, swap_directions=True)
-        self.status_var.set(f"📤 Exportiert: {path}")
+        self.status_var.set(self._tr("status_exported", path=path))
 
     def _refresh_projects(self):
         self.project_listbox.configure(state="normal")
@@ -2006,12 +2003,12 @@ class MinecraftStructureApp(ctk.CTk):
     def _load_selected_project(self):
         selection = self._get_selected_project()
         if selection is None:
-            self.status_var.set("⚠️ Kein Projekt ausgewählt")
+            self.status_var.set(self._tr("status_no_project"))
             return
         try:
             schem_files = list(selection.glob("*.schem"))
             if not schem_files:
-                self.status_var.set("❌ Keine .schem Datei im Projekt")
+                self.status_var.set(self._tr("status_no_schem"))
                 return
             schematic = load_schematic(schem_files[0])
             meta = {}
@@ -2032,21 +2029,21 @@ class MinecraftStructureApp(ctk.CTk):
             self.generated_np = tensor_grid.numpy()
             self.id_to_block = id2block
             prompt = meta.get("prompt", prompt_text_from_txt(selection))
-            self.info_var.set(f"✅ Geladen: {selection.name}\n📐 {schematic.size[0]}×{schematic.size[1]}×{schematic.size[2]}\n📝 {prompt}")
+            self.info_var.set(self._tr("gen_loaded", name=selection.name, x=schematic.size[0], y=schematic.size[1], z=schematic.size[2], prompt=prompt))
             self._update_preview()
             self._update_tf_preview()
             self.save_btn.configure(state="normal")
             self.export_btn.configure(state="normal")
-            self.status_var.set(f"✅ Projekt geladen: {selection.name}")
+            self.status_var.set(self._tr("status_project_loaded", name=selection.name))
         except Exception as e:
-            self.status_var.set(f"❌ Fehler beim Laden: {e}")
+            self.status_var.set(self._tr("status_load_error", err=e))
 
     def _delete_selected_project(self):
         selection = self._get_selected_project()
         if selection is None:
             return
         shutil.rmtree(selection)
-        self.status_var.set(f"🗑 Gelöscht: {selection.name}")
+        self.status_var.set(self._tr("status_project_deleted", name=selection.name))
         self._refresh_projects()
 
     def _export_selected_project(self):
@@ -2058,7 +2055,7 @@ class MinecraftStructureApp(ctk.CTk):
             EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
             dest = EXPORTS_DIR / f"{selection.name}.schem"
             shutil.copy2(schem_files[0], dest)
-            self.status_var.set(f"📤 Exportiert nach: {dest}")
+            self.status_var.set(self._tr("status_project_exported", dest=dest))
 
     def _get_selected_project(self) -> Optional[Path]:
         text = self.project_listbox.get("1.0", "end-1c").strip()
@@ -2094,7 +2091,7 @@ class MinecraftStructureApp(ctk.CTk):
     def _stop_training(self):
         if not self.training_running:
             return
-        self.status_var.set("⏹ Training wird gestoppt und gespeichert...")
+        self.status_var.set(self._tr("status_training_stopping"))
         self.training_running = False
 
     # ═══════════════════════════════════════════════════════════════
@@ -2122,30 +2119,30 @@ class MinecraftStructureApp(ctk.CTk):
         if self.tf_use_cached_hs_var.get():
             # Check if cache exists from the selected cache
             cache_sel = self.tf_cache_selector.get()
-            if cache_sel == "(kein Cache)":
-                self.tf_cache_status_label.configure(text="⏳ Bitte erst einen Cache auswählen")
+            if cache_sel == self._tr("no_cache"):
+                self.tf_cache_status_label.configure(text=self._tr("select_cache_first"))
                 return
             schem_files, txt_files = self._get_training_schem_files()
             result = validate_cache(cache_sel, schem_files, txt_files)
             self.tf_cache_status_label.configure(text=result["message"])
             if not result["valid"]:
-                self.status_var.set(f"⚠️ Cache nicht aktuell: {result['message']}")
+                self.status_var.set(self._tr("status_cache_warning", msg=result['message']))
         else:
-            self.tf_cache_status_label.configure(text="⏳ Kein Cache verwendet")
+            self.tf_cache_status_label.configure(text=self._tr("no_cache_used"))
 
     def _precompute_hidden_states(self):
         """Pre-compute hidden states in a background thread."""
         if self.tf_encoder is None:
-            self.status_var.set("❌ Bitte zuerst den Text Encoder laden")
+            self.status_var.set(self._tr("status_no_encoder_loaded"))
             return
         encoder_name = self.tf_encoder_combo.get()
         schem_files, txt_files = self._get_training_schem_files()
         if not schem_files:
-            self.status_var.set("❌ Keine Trainingsdaten gefunden")
+            self.status_var.set(self._tr("status_no_training_data"))
             return
 
-        self.status_var.set(f"⏳ Berechne Hidden States für {len(schem_files)} Strukturen...")
-        self.tf_cache_status_label.configure(text="⏳ Berechne...")
+        self.status_var.set(self._tr("status_computing_hs", count=len(schem_files)))
+        self.tf_cache_status_label.configure(text=self._tr("computing"))
         threading.Thread(
             target=self._precompute_hidden_states_worker,
             args=(encoder_name, schem_files, txt_files),
@@ -2164,13 +2161,13 @@ class MinecraftStructureApp(ctk.CTk):
                 status_callback=status_cb,
             )
             self.after(0, lambda: self.tf_cache_status_label.configure(
-                text=f"✅ Cache erstellt ({len(schem_files)} Strukturen)"))
+                text=self._tr("cache_created", count=len(schem_files))))
             self.after(0, lambda: self.status_var.set(
-                f"✅ Hidden States gespeichert: {cache_dir.name}"))
+                self._tr("status_hs_saved", name=cache_dir.name)))
         except Exception as e:
             self.after(0, lambda msg=str(e): self.tf_cache_status_label.configure(
-                text=f"❌ Fehler: {msg[:60]}"))
-            self.after(0, lambda msg=str(e): self.status_var.set(f"❌ {msg[:60]}"))
+                text=self._tr("cache_error", msg=msg[:60])))
+            self.after(0, lambda msg=str(e): self.status_var.set(self._tr("cache_error", msg=msg[:60])))
 
     def _check_cache_status(self):
         """Check the cache status and display it."""
@@ -2181,7 +2178,7 @@ class MinecraftStructureApp(ctk.CTk):
         if result["valid"]:
             self.status_var.set(result["message"])
         else:
-            self.status_var.set(f"⚠️ {result['message']}")
+            self.status_var.set(self._tr("status_cache_warning", msg=result['message']))
 
     # ═══════════════════════════════════════════════════════════════
     # MODEL SIZE / ARCHITECTURE SELECTION
@@ -2216,11 +2213,9 @@ class MinecraftStructureApp(ctk.CTk):
             return
         arch = self._get_suggested_arch()
         if arch is None:
-            self.params_info_var.set("❌ Keine passende Architektur gefunden")
+            self.params_info_var.set(self._tr("no_arch_found"))
             return
-        self.params_info_var.set(f"🎯 Ziel: {value:.1f}M → ✅ ~{arch['params_m']:.2f}M Parameter\n"
-                                 f"📐 d_model={arch['d_model']}, nhead={arch['nhead']}, "
-                                 f"layers={arch['num_layers']}, FFN={arch['dim_feedforward']}")
+        self.params_info_var.set(self._tr("target_arch", val=f"{value:.1f}", params=f"{arch['params_m']:.2f}", d_model=arch['d_model'], nhead=arch['nhead'], layers=arch['num_layers'], ffn=arch['dim_feedforward']))
         self._selected_arch = arch
 
     def _update_aug_label(self, value: float):
@@ -2239,11 +2234,11 @@ class MinecraftStructureApp(ctk.CTk):
         self.show_advanced = not self.show_advanced
         if self.show_advanced:
             self.advanced_frame.grid()
-            self.advanced_btn.configure(text="▼ Advanced Settings")
+            self.advanced_btn.configure(text=self._tr("btn_advanced_open"))
             self._update_arch_from_advanced()
         else:
             self.advanced_frame.grid_remove()
-            self.advanced_btn.configure(text="▶ Advanced Settings")
+            self.advanced_btn.configure(text=self._tr("btn_advanced"))
             self._on_size_slider(self.size_slider_var.get())
 
     def _update_arch_from_advanced(self):
@@ -2251,11 +2246,9 @@ class MinecraftStructureApp(ctk.CTk):
             return
         arch = self._get_suggested_arch()
         if arch is None:
-            self.params_info_var.set("❌ Ungültige Werte")
+            self.params_info_var.set(self._tr("invalid_values"))
             return
-        self.params_info_var.set(f"✅ Manuell: ~{arch['params_m']:.2f}M Parameter\n"
-                                 f"📐 d_model={arch['d_model']}, nhead={arch['nhead']}, "
-                                 f"layers={arch['num_layers']}, FFN={arch['dim_feedforward']}")
+        self.params_info_var.set(self._tr("manual_arch", params=f"{arch['params_m']:.2f}", d_model=arch['d_model'], nhead=arch['nhead'], layers=arch['num_layers'], ffn=arch['dim_feedforward']))
         self._selected_arch = arch
 
     # ═══════════════════════════════════════════════════════════════
@@ -2276,7 +2269,7 @@ class MinecraftStructureApp(ctk.CTk):
         self.training_running = True
         self.train_epoch_bar.set(0)
         self.train_batch_bar.set(0)
-        self.status_var.set(f"⏳ Training gestartet ({model_type}, {gs_label})...")
+        self.status_var.set(self._tr("status_training_started", type=model_type, grid=gs_label))
         self.train_btn_transformer.configure(state="disabled")
         self.train_btn_diffusion.configure(state="disabled")
         self.train_btn_tf_diffusion.configure(state="disabled")
@@ -2385,10 +2378,10 @@ class MinecraftStructureApp(ctk.CTk):
                         total_loss += float(loss.detach())
                         if batch_num % max(1, total_batches // 10) == 0 or batch_num == total_batches:
                             self.after(0, lambda bp=batch_num/total_batches, bn=batch_num, tb=total_batches: (
-                                self.train_batch_bar.set(bp), self.train_batch_label.configure(text=f"Batch {bn}/{tb}")))
+                                self.train_batch_bar.set(bp), self.train_batch_label.configure(text=self._tr("batch_progress", bn=bn, tb=tb))))
                     avg_loss = total_loss / max(total_batches, 1)
                     self.after(0, lambda e=epoch, l=avg_loss, p=epoch/epochs: (
-                        self.train_epoch_bar.set(p), self.train_epoch_label.configure(text=f"Transformer Epoche {e}/{epochs}, Loss={l:.4f}")))
+                        self.train_epoch_bar.set(p), self.train_epoch_label.configure(text=self._tr("transformer_epoch_progress", e=e, epochs=epochs, loss=f"{l:.4f}"))))
                     torch.save({"model_state": model.state_dict(), "grid_size": grid_size,
                                 "text_vocab_size": len(dataset.prompt_tokenizer.token_to_id),
                                 "block_vocab_size": len(dataset.voxel_tokenizer.id_to_block),
@@ -2398,7 +2391,7 @@ class MinecraftStructureApp(ctk.CTk):
                                 "augmentation_diversity": augmentation_diversity,
                                 "allow_vertical_movement": allow_vertical_movement,
                                 "epoch": epoch, "loss": avg_loss}, out_dir / "model.pt")
-                self.after(0, lambda: self.status_var.set("✅ Transformer Training abgeschlossen"))
+                self.after(0, lambda: self.status_var.set(self._tr("status_transformer_done")))
 
             elif model_type == "diffusion":
                 continuing_diff = (self.diffusion_model is not None and self.current_diffusion_name
@@ -2445,10 +2438,10 @@ class MinecraftStructureApp(ctk.CTk):
                         total_loss += loss
                         if batch_num % max(1, total_batches // 10) == 0 or batch_num == total_batches:
                             self.after(0, lambda bp=batch_num/total_batches, bn=batch_num, tb=total_batches: (
-                                self.train_batch_bar.set(bp), self.train_batch_label.configure(text=f"Batch {bn}/{tb}")))
+                                self.train_batch_bar.set(bp), self.train_batch_label.configure(text=self._tr("batch_progress", bn=bn, tb=tb))))
                     avg_loss = total_loss / max(total_batches, 1)
                     self.after(0, lambda e=epoch, l=avg_loss, p=epoch/epochs: (
-                        self.train_epoch_bar.set(p), self.train_epoch_label.configure(text=f"Diffusion Epoche {e}/{epochs}, Loss={l:.4f}")))
+                        self.train_epoch_bar.set(p), self.train_epoch_label.configure(text=self._tr("diffusion_epoch_progress", e=e, epochs=epochs, loss=f"{l:.4f}"))))
                     torch.save({"model_state": model.state_dict(), "grid_size": model.grid_size,
                                 "text_vocab_size": len(dataset.prompt_tokenizer.token_to_id),
                                 "block_vocab_size": model.num_blocks, "num_blocks": model.num_blocks,
@@ -2458,7 +2451,7 @@ class MinecraftStructureApp(ctk.CTk):
                                 "augmentation_diversity": augmentation_diversity,
                                 "allow_vertical_movement": allow_vertical_movement,
                                 "epoch": epoch, "loss": avg_loss}, out_dir / "model.pt")
-                self.after(0, lambda: self.status_var.set("✅ Diffusion Training abgeschlossen"))
+                self.after(0, lambda: self.status_var.set(self._tr("status_diffusion_done")))
 
             self.after(0, self._discover_models)
             self.after(0, self._refresh_models_tab)
@@ -2467,7 +2460,7 @@ class MinecraftStructureApp(ctk.CTk):
         except Exception as e:
             import traceback
             traceback.print_exc()
-            self.after(0, lambda msg=str(e)[:100]: self.train_loss_var.set(f"❌ Fehler: {msg}"))
+            self.after(0, lambda msg=str(e)[:100]: self.train_loss_var.set(self._tr("training_error", msg=msg)))
         finally:
             self.training_running = False
             self.after(0, lambda: self.train_btn_transformer.configure(state="normal"))
@@ -2484,13 +2477,12 @@ class MinecraftStructureApp(ctk.CTk):
         allow_vertical = bool(self.setting_aug_vertical.get())
         grid_size = self._get_selected_grid_size()
         gx, gy, gz = grid_size
-        msg = (f"🚀 Export to Kaggle (2× T4)\n\nEin vollständiges Kaggle-Notebook wird erstellt mit:\n\n"
-               f"📐 Grid: {gx}×{gy}×{gz}\n📊 Epochen: {epochs}\n📦 Batch Size: {batch_size}\n"
-               f"⚡ Learning Rate: {lr}\n🔄 Vielfalt (Aug.): {aug_diversity}\n⬆ Vertikale Bewegung: {'Ja' if allow_vertical else 'Nein'}\n\n"
-               f"📁 Trainingsdaten ({len(self.data_dirs)} Ordner) werden als ZIP eingepackt.\n\nFortfahren?")
-        if not askyesno("Export to Kaggle", msg):
+        vertical_str = "Ja" if allow_vertical else "Nein" if self.config.language == "de" else "Yes" if allow_vertical else "No"
+        msg = self._tr("kaggle_msg", gx=gx, gy=gy, gz=gz, epochs=epochs, batch=batch_size,
+                       lr=lr, aug=aug_diversity, vertical=vertical_str, count=len(self.data_dirs))
+        if not askyesno(self._tr("kaggle_title"), msg):
             return
-        self.status_var.set("⏳ Erstelle Kaggle-Export...")
+        self.status_var.set(self._tr("status_kaggle_creating"))
         self.kaggle_export_btn.configure(state="disabled")
         threading.Thread(target=self._kaggle_export_worker, daemon=True).start()
 
@@ -2550,17 +2542,15 @@ class MinecraftStructureApp(ctk.CTk):
                                                architecture=arch, tf_unet_config=tf_unet_config,
                                                air_weight=air_weight,
                                                encoder_name=enc_name, context_dim=ctx_dim)
-            self.after(0, lambda p=export_path: self.status_var.set(f"✅ Kaggle-Export erstellt: {p.name}"))
+            self.after(0, lambda p=export_path: self.status_var.set(self._tr("status_kaggle_done", name=p.name)))
             self.after(0, lambda p=export_path: showinfo(
-                "Export erfolgreich",
-                f"Kaggle-Export erstellt unter:\n\n{p}\n\n"
-                f"📁 Enthält:\n  • kaggle_notebook.ipynb\n  • training_data.zip\n  • model.py, dataset.py, train.py\n  • README.md mit Anleitung\n\n"
-                f"Lade die Dateien auf Kaggle hoch und wähle GPU T4 x2 als Accelerator."))
+                self._tr("kaggle_success_title"),
+                self._tr("kaggle_success_msg", path=p)))
         except Exception as e:
             import traceback
             traceback.print_exc()
-            self.after(0, lambda err=str(e): self.status_var.set(f"❌ Export fehlgeschlagen: {err[:80]}"))
-            self.after(0, lambda err=str(e): showerror("Export fehlgeschlagen", str(err)))
+            self.after(0, lambda err=str(e): self.status_var.set(self._tr("status_kaggle_failed", err=err[:80])))
+            self.after(0, lambda err=str(e): showerror(self._tr("kaggle_failed_title"), str(err)))
         finally:
             self.after(0, lambda: self.kaggle_export_btn.configure(state="normal"))
 
