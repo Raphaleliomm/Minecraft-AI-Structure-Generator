@@ -7,3 +7,4 @@ test_outputs/
 generated.schem
 generated*.schem
 *.pt
+tests/

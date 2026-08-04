@@ -185,7 +185,10 @@ def _format_block_state(base: str, states: dict[str, str]) -> str:
     return f"{base}[{inner}]"
 
 
-_HORIZONTAL_DIRECTIONS = ("north", "east", "south", "west")
+# Counter-clockwise order to match rotate_block_grid_y's geometry rotation
+# (north -> west -> south -> east). Using clockwise here would swap
+# north<->south and east<->west relative to the voxel geometry.
+_HORIZONTAL_DIRECTIONS = ("north", "west", "south", "east")
 
 
 def _rotate_direction_y(value: str, quarter_turns: int) -> str:
