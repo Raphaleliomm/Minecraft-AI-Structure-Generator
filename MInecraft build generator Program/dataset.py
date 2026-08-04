@@ -15,93 +15,6 @@ from torch.utils.data import Dataset
 AIR = "minecraft:air"
 SCHEM_EXTENSIONS = {".schem", ".schematic"}
 
-# ─── Simple mode: block name simplification ───
-
-# All Minecraft wood/planks types that should map to oak
-_WOOD_TYPES = {
-    "oak", "spruce", "birch", "jungle", "acacia", "dark_oak",
-    "crimson", "warped", "mangrove", "cherry", "bamboo",
-}
-# All Minecraft color types for carpet/wool
-_COLOR_TYPES = {
-    "white", "orange", "magenta", "light_blue", "yellow", "lime",
-    "pink", "gray", "light_gray", "cyan", "purple", "blue",
-    "brown", "green", "red", "black",
-}
-
-
-def _simplify_base(block_name: str) -> str | None:
-    """If block matches a simplification rule, return the simplified block name.
-    Returns None if no rule matches."""
-    # Stripped/regular logs and woods -> oak
-    for stripped in ("stripped_", ""):
-        for wood in _WOOD_TYPES:
-            if block_name == f"minecraft:{stripped}{wood}_log":
-                return "minecraft:oak_log"
-            if block_name == f"minecraft:{stripped}{wood}_wood":
-                return "minecraft:oak_wood"
-        if block_name == f"minecraft:{stripped}bamboo_block":
-            return "minecraft:oak_log"
-
-    # Planks -> oak planks
-    for wood in _WOOD_TYPES:
-        if block_name == f"minecraft:{wood}_planks":
-            return "minecraft:oak_planks"
-
-    # Carpets -> red carpet
-    for color in _COLOR_TYPES:
-        if block_name == f"minecraft:{color}_carpet":
-            return "minecraft:red_carpet"
-
-    # Wool -> white wool
-    for color in _COLOR_TYPES:
-        if block_name == f"minecraft:{color}_wool":
-            return "minecraft:white_wool"
-
-    # Beds -> blue bed
-    for color in _COLOR_TYPES:
-        if block_name == f"minecraft:{color}_bed":
-            return "minecraft:blue_bed"
-
-    # Stone brick variants -> stone_bricks
-    if block_name.startswith("minecraft:") and ("stone_brick" in block_name or "stone_bricks" in block_name):
-        return "minecraft:stone_bricks"
-
-    # Cobblestone variants -> cobblestone
-    if block_name.startswith("minecraft:") and "cobblestone" in block_name:
-        return "minecraft:cobblestone"
-    if block_name.startswith("minecraft:") and "cobbled_deepslate" in block_name:
-        return "minecraft:cobblestone"
-
-    # Deepslate stairs -> deepslate_brick_stairs
-    if block_name.startswith("minecraft:") and block_name.endswith("_stairs") and "deepslate" in block_name:
-        return "minecraft:deepslate_brick_stairs"
-
-    # Potted plants -> potted blue orchid
-    if block_name.startswith("minecraft:potted_"):
-        return "minecraft:potted_blue_orchid"
-
-    return None
-
-
-def simplify_block(block_name: str) -> str:
-    """Simplify a Minecraft block name to a canonical variant.
-    All Logs/Woods -> oak, Planks -> oak planks,
-    Carpets -> red carpet, Wool -> white wool,
-    Beds -> blue bed, Potted plants -> potted blue orchid,
-    Stone brick variants -> stone_bricks,
-    Cobblestone variants -> cobblestone,
-    Deepslate stairs -> deepslate_brick_stairs.
-    Non-matching blocks keep their important block states (facing, axis, etc.)."""
-    # First strip states to check base block name against rules
-    base = strip_block_state(block_name)
-    simplified = _simplify_base(base)
-    if simplified is not None:
-        return simplified
-    # Not simplified: keep important block states
-    return keep_important_states(block_name)
-
-
 # ─── Block state handling ───
 
 BLOCK_STATE_PATTERN = re.compile(r"^([a-z0-9_:-]+)(\[.*\])?$")
@@ -883,13 +796,9 @@ class VoxelTokenizer:
     def vocab_size(self) -> int:
         return len(self.id_to_block)
 
-    def fit(self, schematics: Iterable[SchematicData], target_size: tuple[int, int, int],
-            simple_mode: bool = False) -> None:
+    def fit(self, schematics: Iterable[SchematicData], target_size: tuple[int, int, int]) -> None:
         """Build vocabulary from ALL block names across ALL schematics,
         keeping only important block states.
-
-        If simple_mode=True, applies simplify_block() to reduce block variants
-        (e.g. all wood types -> oak, all wool colors -> white).
         """
         blocks = {AIR}
         self.block_entity_types: set[str] = set()
@@ -901,10 +810,7 @@ class VoxelTokenizer:
             for rotation in range(4):
                 rotated = rotate_block_grid_y(base_grid, rotation)
                 rotated_blocks, _ = grid_to_blocks(rotated)
-                if simple_mode:
-                    blocks.update(simplify_block(block) for block in rotated_blocks)
-                else:
-                    blocks.update(keep_important_states(block) for block in rotated_blocks)
+                blocks.update(keep_important_states(block) for block in rotated_blocks)
 
             # Track which blocks have BlockEntities
             for be in schematic.block_entities:
@@ -920,26 +826,18 @@ class VoxelTokenizer:
             self.id_to_block[idx] = block
 
     def encode_blocks(self, blocks: list[str], size: tuple[int, int, int],
-                      target_size: tuple[int, int, int],
-                      simple_mode: bool = False) -> torch.Tensor:
+                      target_size: tuple[int, int, int]) -> torch.Tensor:
         fitted = fit_to_size(blocks, size, target_size)
-        if simple_mode:
-            cleaned = [simplify_block(b) for b in fitted]
-        else:
-            cleaned = [keep_important_states(b) for b in fitted]
+        cleaned = [keep_important_states(b) for b in fitted]
         ids = [self.block_to_id.get(block, self.block_to_id[AIR]) for block in cleaned]
         return torch.tensor(ids, dtype=torch.long).view(
             target_size[1], target_size[2], target_size[0]).permute(2, 0, 1)
 
     def safe_encode_blocks(self, blocks: list[str], size: tuple[int, int, int],
-                           target_size: tuple[int, int, int],
-                           simple_mode: bool = False) -> torch.Tensor:
+                           target_size: tuple[int, int, int]) -> torch.Tensor:
         """Like encode_blocks, but falls back to AIR (0) for any unknown block."""
         fitted = fit_to_size(blocks, size, target_size)
-        if simple_mode:
-            cleaned = [simplify_block(b) for b in fitted]
-        else:
-            cleaned = [keep_important_states(b) for b in fitted]
+        cleaned = [keep_important_states(b) for b in fitted]
         air_id = self.block_to_id.get(AIR, 0)
         ids = []
         for block in cleaned:
@@ -954,16 +852,12 @@ class VoxelTokenizer:
         self,
         blocks: list[str],
         target_size: tuple[int, int, int],
-        simple_mode: bool = False,
     ) -> torch.Tensor:
         """Encode an already target-sized flat block list."""
         expected = target_size[0] * target_size[1] * target_size[2]
         if len(blocks) != expected:
             raise ValueError(f"Expected {expected} blocks, got {len(blocks)}")
-        if simple_mode:
-            cleaned = [simplify_block(b) for b in blocks]
-        else:
-            cleaned = [keep_important_states(b) for b in blocks]
+        cleaned = [keep_important_states(b) for b in blocks]
         air_id = self.block_to_id.get(AIR, 0)
         ids = []
         for block in cleaned:
@@ -1110,7 +1004,6 @@ class MultiSourceSchematicDataset(Dataset):
                  augmentation_diversity: int = 1,
                  allow_vertical_movement: bool = False,
                  max_augmented_variants: int | None = 512,
-                 simple_mode: bool = False,
                  structure_block_weight: float = 100.0,
                  air_weight_factor: float = 75.0,
                  hidden_states: torch.Tensor | None = None,
@@ -1198,14 +1091,13 @@ class MultiSourceSchematicDataset(Dataset):
         self.target_size = target_size
         self.augmentation_diversity = int(augmentation_diversity)
         self.allow_vertical_movement = bool(allow_vertical_movement)
-        self.simple_mode = bool(simple_mode)
         self.prompt_tokenizer = prompt_tokenizer or PromptTokenizer()
         if prompt_tokenizer is None:
             self.prompt_tokenizer.fit(example.prompt for example in self.examples)
 
         self.voxel_tokenizer = voxel_tokenizer or VoxelTokenizer()
         if voxel_tokenizer is None:
-            self.voxel_tokenizer.fit(self.schematics, target_size, simple_mode=simple_mode)
+            self.voxel_tokenizer.fit(self.schematics, target_size)
 
         category_counts: dict[int, int] = {}
         for example in self.examples:
@@ -1228,7 +1120,7 @@ class MultiSourceSchematicDataset(Dataset):
             example.transform,
         )
         voxel_ids = self.voxel_tokenizer.safe_encode_prepared_blocks(
-            transformed_blocks, self.target_size, simple_mode=self.simple_mode)
+            transformed_blocks, self.target_size)
         
         # ── Per-structure adaptive weight ──
         # Berechne pro-token Gewichte:
