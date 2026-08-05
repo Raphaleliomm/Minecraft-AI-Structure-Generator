@@ -93,7 +93,7 @@ Unterstützte Modelle (alle Gewichte frozen):
 ## GUI-Funktionen
 
 - **Modellauswahl**: Transformer, Diffusion oder TF-Diffusion, verschiedene Checkpoints
-- **Grid-Größe**: 16×16×16, 32×32×32, 48×48×48, 64×64×64, 96×96×96, 128×128×128, 256×256×256 (96×96×96+ istexperimentell)
+- **Grid-Größe**: 16×16×16, 32×32×32, 48×48×48, 64×64×64, 96×96×96, 128×128×128, 256×256×256 (96×96×96+ ist experimentell)
 - **Temperatur & Top-K**: Steuerung der Generierungs-Zufälligkeit
 - **3D-Vorschau**: Orbit-Kamera (Maus ziehen = rotieren, Scrollen = zoomen)
 - **Training**: Direkt aus der GUI mit Augmentierungs-Optionen
