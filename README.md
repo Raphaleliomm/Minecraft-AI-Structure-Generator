@@ -1,4 +1,4 @@
-# Minecraft Structure Generator
+# Minecraft AI Structure Generator
 
 PyTorch-basierte Pipeline zur Generierung von Minecraft-Strukturen aus Text-Prompts.
 Unterstützt mehrere Architekturen: Shared-Weight-Transformer, Diffusion-Modelle und
