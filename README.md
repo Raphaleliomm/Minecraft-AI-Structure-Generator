@@ -7,7 +7,7 @@ pre-trained Text-Encoder (Phi-3.5, Gemma 2/3, Flan-T5).
 ## Features
 
 - **Text-zu-Bauwerk**: Generiere Minecraft-Strukturen aus natürlicher Sprache
-- **Multi-Architektur**: Wähle zwischen Transformer, Diffusion oder TF-Diffusion (hybride Modelle)
+- **Multi-Architektur**: Wähle zwischen Transformer, Diffusion oder TF-Diffusion (Empfohlen: TF-Diffusion)
 - **GUI-Anwendung**: Benutzerfreundliche Oberfläche mit CustomTkinter
 - **3D-Vorschau**: Echtzeit-3D-Ansicht generierter Bauwerke (pyglet/OpenGL)
 - **Training**: Integriertes Training mit Augmentierung, Sampling-Gewichten und mehr
