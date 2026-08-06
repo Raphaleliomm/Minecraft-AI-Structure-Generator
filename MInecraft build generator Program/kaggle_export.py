@@ -142,13 +142,13 @@ def _package_training_data(export_dir: Path, data_dirs: List[str]) -> None:
         for dir_path_str in data_dirs:
             dir_path = Path(dir_path_str)
             if not dir_path.exists():
-                print(f"  ⚠️ Data directory not found, skipping: {dir_path}")
+                print(f"  Data directory not found, skipping: {dir_path}")
                 continue
             for fpath in sorted(dir_path.rglob("*")):
                 if fpath.is_file() and fpath.suffix.lower() in {".schem", ".schematic", ".txt", ".json"}:
                     arcname = f"{dir_path.name}/{fpath.relative_to(dir_path)}"
                     zf.write(str(fpath), arcname)
-    print(f"  📦 Training data ZIP created: {zip_path}")
+    print(f"  Training data ZIP created: {zip_path}")
 
 
 def _create_notebook(
@@ -230,7 +230,7 @@ def _create_notebook(
                 "---"
             ),
             _code_cell(
-                "# ⚡ Install dependencies\n"
+                "# Install dependencies\n"
                 "!pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118 -q\n"
                 "!pip install nbtlib matplotlib numpy tqdm -q\n"
                 "!pip install --upgrade sympy -q\n\n"
@@ -239,10 +239,10 @@ def _create_notebook(
                 "from pathlib import Path\n"
                 "import torch\n"
                 "import numpy as np\n\n"
-                "print('✅ Dependencies installed')"
+                "print('Dependencies installed')"
             ),
             _code_cell(
-                "# 📂 Extract training data\n"
+                "# Extract training data\n"
                 "DATA_ZIP = '/kaggle/input/training_data.zip'\n"
                 "# The data is bundled in the notebook directory;\n"
                 "# we also copy it from the working dir if different.\n"
@@ -251,28 +251,28 @@ def _create_notebook(
                 "    import zipfile\n"
                 "    with zipfile.ZipFile(data_zip_path, 'r') as zf:\n"
                 "        zf.extractall('data')\n"
-                "    print('✅ Extracted training_data.zip to data/')\n"
+                "    print('Extracted training_data.zip to data/')\n"
                 "else:\n"
-                "    print('⚠️ training_data.zip not found; creating empty directories')\n"
+                "    print('training_data.zip not found; creating empty directories')\n"
                 "    os.makedirs('data', exist_ok=True)\n\n"
                 "# List what we got\n"
                 "for p in sorted(Path('data').rglob('*.schem'))[:10]:\n"
                 "    print(f'  {p}')\n"
                 "total = len(list(Path('data').rglob('*.schem')))\n"
-                "print(f'📊 Total .schem files: {total}')"
+                "print(f'Total .schem files: {total}')"
             ),
             _code_cell(
-                "# 🧠 Import model & dataset\n"
+                "# Import model & dataset\n"
                 "sys.path.insert(0, '.')\n"
                 "from dataset import MultiSourceSchematicDataset, PromptTokenizer, VoxelTokenizer\n"
                 + (f"from model import SharedWeightVoxelTransformer\n" if model_type == "transformer" else "")
                 + (f"from app.diffusion_model import VoxelDiffusionModel, train_diffusion_step\n" if model_type == "diffusion" else "")
                 + (f"from app.diffusion_model import TransformerDiffusionModel, train_transformer_diffusion_step\n" if model_type == "transformer_diffusion" else "")
                 + "from torch.utils.data import DataLoader\n\n"
-                "print('✅ Modules imported')"
+                "print('Modules imported')"
             ),
             _code_cell(
-                "# ⚙️ Settings (auto-filled from GUI)\n"
+                "# Settings (auto-filled from GUI)\n"
                 f"GRID_SIZE = ({gx}, {gy}, {gz})\n"
                 f"EPOCHS = {epochs}\n"
                 f"BATCH_SIZE = {batch_size}\n"
@@ -282,13 +282,13 @@ def _create_notebook(
                 f"AIR_WEIGHT = {air_weight}\n"
                 f"NOISE_BLOCK_PROB = 0.20  # 20% of steps get random wrong blocks injected (learn to remove bad blocks)\n\n"
                 "DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')\n"
-                "print(f'🚀 Device: {DEVICE}')\n"
+                "print(f'Device: {DEVICE}')\n"
                 "if torch.cuda.is_available():\n"
                 "    print(f'   GPU: {torch.cuda.get_device_name(0)}')\n"
                 "    print(f'   Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB')"
             ),
             _code_cell(
-                "# 📦 Load dataset\n"
+                "# Load dataset\n"
                 "data_dirs = [str(p) for p in Path('data').iterdir() if p.is_dir()]\n"
                 "print(f'Data directories: {data_dirs}')\n\n"
                 "dataset = MultiSourceSchematicDataset(\n"
@@ -299,9 +299,9 @@ def _create_notebook(
                 "    allow_vertical_movement=ALLOW_VERTICAL,\n"
                 "    air_weight_factor=AIR_WEIGHT,\n"
                 ")\n\n"
-                "print(f'📊 Dataset size: {len(dataset)}')\n"
-                "print(f'🧱 Block vocab: {len(dataset.voxel_tokenizer.id_to_block)}')\n"
-                "print(f'🔤 Prompt vocab: {len(dataset.prompt_tokenizer.token_to_id)}')\n\n"
+                "print(f'Dataset size: {len(dataset)}')\n"
+                "print(f'Block vocab: {len(dataset.voxel_tokenizer.id_to_block)}')\n"
+                "print(f'Prompt vocab: {len(dataset.prompt_tokenizer.token_to_id)}')\n\n"
                 "loader = DataLoader(\n"
                 "    dataset, batch_size=BATCH_SIZE, shuffle=True,\n"
                 "    num_workers=2, pin_memory=(DEVICE.type == 'cuda'),\n"
@@ -310,13 +310,13 @@ def _create_notebook(
             _code_cell(model_code),
             _code_cell(train_code),
             _code_cell(
-                "# ✅ Training complete\n"
+                "# Training complete\n"
                 "elapsed = time.time() - start_time\n"
-                "print(f'✅ Training completed in {elapsed/60:.1f} min')\n"
-                "print(f'📊 Best loss: {best_loss:.4f}')\n"
-                "print(f'📁 Model saved to model.pt')\n\n"
+                "print(f'Training completed in {elapsed/60:.1f} min')\n"
+                "print(f'Best loss: {best_loss:.4f}')\n"
+                "print(f'Model saved to model.pt')\n\n"
                 "# Download link for the model\n"
-                "print('\\n⬇️ To download the trained model, find model.pt in the output tab.')"
+                "print('\\nTo download the trained model, find model.pt in the output tab.')"
             ),
         ],
         "metadata": {
@@ -337,12 +337,12 @@ def _create_notebook(
     notebook_path = export_dir / "kaggle_notebook.ipynb"
     with open(str(notebook_path), "w", encoding="utf-8") as f:
         json.dump(notebook, f, indent=1, ensure_ascii=False)
-    print(f"  📓 Notebook created: {notebook_path}")
+    print(f"  Notebook created: {notebook_path}")
 
 
 def _build_transformer_model_code(d_model, nhead, num_layers, dim_ff):
     return (
-        "# 🏗️ Create model\n"
+        "# Create model\n"
         "model = SharedWeightVoxelTransformer(\n"
         "    text_vocab_size=len(dataset.prompt_tokenizer.token_to_id),\n"
         "    block_vocab_size=len(dataset.voxel_tokenizer.id_to_block),\n"
@@ -354,7 +354,7 @@ def _build_transformer_model_code(d_model, nhead, num_layers, dim_ff):
         "    dropout=0.1,\n"
         ").to(DEVICE)\n\n"
         "total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)\n"
-        "print(f'🧠 Trainable parameters: {total_params:,} ({total_params/1e6:.2f}M)')\n\n"
+        "print(f'Trainable parameters: {total_params:,} ({total_params/1e6:.2f}M)')\n\n"
         "optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)\n\n"
         "# Cosine LR scheduler with warmup\n"
         "total_steps = EPOCHS * len(loader)\n"
@@ -370,7 +370,7 @@ def _build_transformer_model_code(d_model, nhead, num_layers, dim_ff):
 
 def _build_transformer_train_code(air_weight):
     return (
-        "# 🎯 Training Loop\n"
+        "# Training Loop\n"
         "best_loss = float('inf')\n"
         "loss_history = []\n"
         "start_time = time.time()\n\n"
@@ -419,7 +419,7 @@ def _build_transformer_train_code(air_weight):
         "            'epoch': epoch,\n"
         "            'loss': avg_loss,\n"
         "        }, 'model.pt')\n"
-        "        print(f'  → new best model saved (loss={avg_loss:.4f})')"
+        "        print(f'  -> new best model saved (loss={avg_loss:.4f})')"
     ).replace("{d_model}", str(d_model)).replace("{nhead}", str(nhead)).replace("{num_layers}", str(num_layers)).replace("{dim_ff}", str(dim_ff))
 
 
@@ -429,7 +429,7 @@ def _build_transformer_save_code(d_model, nhead, num_layers, dim_ff):
 
 def _build_diffusion_model_code():
     return (
-        "# 🏗️ Create model\n"
+        "# Create model\n"
         "from app.diffusion_model import VoxelDiffusionModel, train_diffusion_step\n"
         "model = VoxelDiffusionModel(\n"
         "    num_blocks=len(dataset.voxel_tokenizer.id_to_block),\n"
@@ -439,14 +439,14 @@ def _build_diffusion_model_code():
         "    channel_multipliers=(1, 2, 2), num_timesteps=50,\n"
         ").to(DEVICE)\n\n"
         "total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)\n"
-        "print(f'🧠 Trainable parameters: {total_params:,} ({total_params/1e6:.2f}M)')\n\n"
+        "print(f'Trainable parameters: {total_params:,} ({total_params/1e6:.2f}M)')\n\n"
         "optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)"
     )
 
 
 def _build_diffusion_train_code(air_weight):
     return (
-        "# 🎯 Training Loop\n"
+        "# Training Loop\n"
         "best_loss = float('inf')\n"
         "loss_history = []\n"
         "start_time = time.time()\n\n"
@@ -475,7 +475,7 @@ def _build_diffusion_train_code(air_weight):
         "            'epoch': epoch,\n"
         "            'loss': avg_loss,\n"
         "        }, 'model.pt')\n"
-        "        print(f'  → new best model saved (loss={avg_loss:.4f})')"
+        "        print(f'  -> new best model saved (loss={avg_loss:.4f})')"
     )
 
 
@@ -511,7 +511,7 @@ def _build_tf_diffusion_model_code(channels, ch_mult, d_model, ca_heads, encoder
         import_line = "from transformers import AutoModelForCausalLM, AutoTokenizer\n"
         model_load_line = "encoder = AutoModelForCausalLM.from_pretrained(encoder_name, torch_dtype=torch.float16, low_cpu_mem_usage=True)\n"
     return (
-        "# 🏗️ Create model\n"
+        "# Create model\n"
         "from app.diffusion_model import TransformerDiffusionModel, train_transformer_diffusion_step\n"
         "model = TransformerDiffusionModel(\n"
         "    num_blocks=len(dataset.voxel_tokenizer.id_to_block),\n"
@@ -525,7 +525,7 @@ def _build_tf_diffusion_model_code(channels, ch_mult, d_model, ca_heads, encoder
         f"    context_proj_dim={d_model * 2},\n"
         ").to(DEVICE)\n\n"
         "total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)\n"
-        "print(f'🧠 Trainable parameters: {total_params:,} ({total_params/1e6:.2f}M)')\n\n"
+        "print(f'Trainable parameters: {total_params:,} ({total_params/1e6:.2f}M)')\n\n"
         "optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)\n\n"
         "# Load frozen text encoder\n"
         + import_line
@@ -538,7 +538,7 @@ def _build_tf_diffusion_model_code(channels, ch_mult, d_model, ca_heads, encoder
         "encoder.eval()\n"
         "for param in encoder.parameters():\n"
         "    param.requires_grad = False\n"
-        f"print(f'✅ Encoder loaded: {{encoder_name}}')\n\n"
+        f"print(f'Encoder loaded: {{encoder_name}}')\n\n"
         f"ENCODER_DISPLAY_NAME = '{encoder_name}'\n"
         f"ENCODER_HF_ID = '{hf_id}'\n"
         f"ENCODER_HIDDEN_DIM = {context_dim}\n"
@@ -558,7 +558,7 @@ def _build_tf_diffusion_train_code(air_weight, encoder_name="Phi-3.5-mini", cont
             "            context = outputs.hidden_states[-1].to(dtype=next(model.parameters()).dtype)\n"
         )
     return (
-        "# 🎯 Training Loop\n"
+        "# Training Loop\n"
         "best_loss = float('inf')\n"
         "loss_history = []\n"
         "start_time = time.time()\n\n"
@@ -602,7 +602,7 @@ def _build_tf_diffusion_train_code(air_weight, encoder_name="Phi-3.5-mini", cont
         "            'epoch': epoch,\n"
         "            'loss': avg_loss,\n"
         "        }, 'model.pt')\n"
-        "        print(f'  → new best model saved (loss={avg_loss:.4f})')"
+        "        print(f'  -> new best model saved (loss={avg_loss:.4f})')"
     )
 
 
@@ -644,7 +644,7 @@ def _create_readme(
 
     readme = f"""# Minecraft Structure Generator — Kaggle Export
 
-## 📁 Contents
+## Contents
 
 | File | Description |
 |------|-------------|
@@ -655,7 +655,7 @@ def _create_readme(
 | `dataset.py` | Dataset & tokenizer |
 | `requirements.txt` | Python dependencies |
 
-## 🚀 How to Use
+## How to Use
 
 1. **Upload to Kaggle**
    - Go to [kaggle.com](https://kaggle.com) → Create → New Notebook
@@ -668,7 +668,7 @@ def _create_readme(
    - (Optional) Set **Persistence** → **Files only** if you want the model output to persist
 
 3. **Run the Notebook**
-   - Click "Run All" (⏩)
+   - Click "Run All"
    - Training will run for {epochs} epochs with batch size {batch_size}
    - Grid size: {gx}×{gy}×{gz}
    - The best model checkpoint will be saved as `model.pt`
@@ -677,7 +677,7 @@ def _create_readme(
    - After training completes, find `model.pt` in the output
    - Download it and place it in your local `runs/` directory
 
-## ⚙️ Training Settings
+## Training Settings
 
 | Parameter | Value |
 |-----------|-------|
@@ -689,7 +689,7 @@ def _create_readme(
 | Architecture | {arch_str} |
 | Air Weight | {air_weight} |
 
-## 📝 Notes
+## Notes
 
 - Training typically takes **2-8 hours** on 2× T4 GPUs depending on dataset size.
 - The notebook uses cosine LR scheduling with 500-step warmup (transformer only).
@@ -698,7 +698,7 @@ def _create_readme(
 """
     readme_path = export_dir / "README.md"
     readme_path.write_text(readme, encoding="utf-8")
-    print(f"  📖 README created: {readme_path}")
+    print(f"  README created: {readme_path}")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -740,4 +740,4 @@ if __name__ == "__main__":
         grid_size=(16, 16, 16),
         model_type="transformer",
     )
-    print(f"\n✅ Export created at: {path}")
+    print(f"\nExport created at: {path}")

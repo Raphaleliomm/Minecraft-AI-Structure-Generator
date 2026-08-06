@@ -363,7 +363,7 @@ def main() -> None:
     for data_dir in args.data_dirs:
         dir_path = Path(data_dir)
         if not dir_path.exists():
-            print(f"⚠ Directory not found: {dir_path}")
+            print(f"Directory not found: {dir_path}")
             continue
         for schem_path in sorted(dir_path.iterdir()):
             if schem_path.suffix.lower() not in SCHEM_EXTENSIONS:
@@ -377,7 +377,7 @@ def main() -> None:
             all_sources.append((schem_path, prompt))
 
     if not all_sources:
-        print("❌ No source schematics found!")
+        print("No source schematics found!")
         return
 
     print(f"Found {len(all_sources)} source schematics")
@@ -407,7 +407,7 @@ def main() -> None:
         try:
             schematic = load_schematic(schem_path)
         except Exception as e:
-            print(f"  ⚠ Skip: {e}")
+            print(f"  Skip: {e}")
             continue
 
         # Analyze texture profile before any transforms
@@ -447,9 +447,9 @@ def main() -> None:
             save_schem(out_path, grid, id2block)
             total_written += 1
 
-        print(f"  ✅ {args.variants_per_schematic} variants written")
+        print(f"  {args.variants_per_schematic} variants written")
 
-    print(f"\n✅ Done! Generated {total_written} texture-aware schematics to {out_dir}")
+    print(f"\nDone! Generated {total_written} texture-aware schematics to {out_dir}")
 
 
 if __name__ == "__main__":

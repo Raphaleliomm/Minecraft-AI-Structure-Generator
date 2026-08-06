@@ -1,4 +1,4 @@
-"""Minecraft Structure Generator - Complete Shippable Application.
+"""Minecraft Structure Generator.
 CustomTkinter-based multi-tab app with 3D preview, model switching,
 project management, settings, training tab, and Model Manager.
 
@@ -45,7 +45,7 @@ ctk.set_default_color_theme("green")
 
 # ─── Constants ───
 APP_NAME = "Minecraft Structure Generator"
-VERSION = "2.1.0"
+VERSION = "0.1"
 PROJECTS_DIR = Path("projects")
 EXPORTS_DIR = Path("exports")
 
@@ -72,12 +72,12 @@ MC_FONT = "Consolas"
 # ─── Transformer Diffusion UNet presets ───
 # Each preset: (display_name, channels, channel_multipliers, d_model, cross_attn_heads)
 TF_DIFFUSION_PRESETS = [
-    ("🐣 Tiny (0.5M)", 16, (1, 2, 2), 32, 2),
-    ("🔹 Small (1.5M)", 32, (1, 2, 2), 64, 4),
-    ("🔶 Medium (4.5M)", 48, (1, 2, 3), 96, 4),
-    ("🔴 Large (12M)", 64, (1, 2, 3, 4), 128, 6),
-    ("💎 XL (35M)", 96, (1, 2, 3, 4), 192, 8),
-    ("🚀 XXL (80M)", 128, (1, 2, 3, 4, 4), 256, 8),
+    ("Tiny (0.5M)", 16, (1, 2, 2), 32, 2),
+    ("Small (1.5M)", 32, (1, 2, 2), 64, 4),
+    ("Medium (4.5M)", 48, (1, 2, 3), 96, 4),
+    ("Large (12M)", 64, (1, 2, 3, 4), 128, 6),
+    ("XL (35M)", 96, (1, 2, 3, 4), 192, 8),
+    ("XXL (80M)", 128, (1, 2, 3, 4, 4), 256, 8),
 ]
 
 # Grid size options shared across all model types
@@ -200,7 +200,7 @@ class MinecraftStructureApp(ctk.CTk):
         header.grid_propagate(False)
         header._mc_skin_locked = True
 
-        ctk.CTkLabel(header, text="▣", width=44, font=self._mc_font(30, "bold"),
+        ctk.CTkLabel(header, text="MC", width=44, font=self._mc_font(30, "bold"),
                      text_color=MC_GOLD, fg_color=MC_DIRT, corner_radius=0,
         ).grid(row=0, column=0, sticky="nsw", padx=(8, 10), pady=8)
 
@@ -436,7 +436,7 @@ class MinecraftStructureApp(ctk.CTk):
                       command=lambda: self._set_horizontal_orbit(315)).grid(row=0, column=2, padx=2)
         ctk.CTkButton(orbit_frame, text="SO", font=("Segoe UI", 11), width=50, height=26,
                       command=lambda: self._set_horizontal_orbit(225)).grid(row=0, column=3, padx=2)
-        ctk.CTkLabel(orbit_frame, text="🔍", font=("Segoe UI", 12)).grid(row=0, column=4, padx=(8, 2))
+        ctk.CTkLabel(orbit_frame, text="Zoom", font=("Segoe UI", 12)).grid(row=0, column=4, padx=(8, 2))
         self.zoom_slider = ctk.CTkSlider(orbit_frame, from_=1.5, to=6.0, number_of_steps=45, width=80)
         self.zoom_slider.grid(row=0, column=5, padx=(0, 4))
         self.zoom_slider.set(self.zoom_scale)
@@ -585,7 +585,7 @@ class MinecraftStructureApp(ctk.CTk):
         hdr = ctk.CTkFrame(card, fg_color="transparent")
         hdr.grid(row=0, column=0, sticky="ew", padx=14, pady=(10, 4))
         hdr.grid_columnconfigure(0, weight=1)
-        name_text = f"📦 {entry.name}"
+        name_text = f"{entry.name}"
         if is_default:
             name_text += self._tr("default_badge")
         ctk.CTkLabel(hdr, text=name_text, font=("Segoe UI", 15, "bold")).grid(row=0, column=0, sticky="w")
@@ -608,10 +608,10 @@ class MinecraftStructureApp(ctk.CTk):
         else:
             info = (f"d_model={entry.d_model}  channels={entry.channels}  steps={entry.num_timesteps}  "
                     f"{bl}={entry.block_vocab_size}")
-        ctk.CTkLabel(meta, text=f"📐 {grid_str}  🧱 {info}", font=("Segoe UI", 11),
+        ctk.CTkLabel(meta, text=f"{grid_str}  {info}", font=("Segoe UI", 11),
                      text_color=("gray50", "gray40")).grid(row=0, column=0, sticky="w")
         if entry.epochs_trained > 0:
-            ctk.CTkLabel(meta, text=f"📊 {entry.epochs_trained} {self._tr('epochs_label')}  Loss={entry.last_loss:.4f}",
+            ctk.CTkLabel(meta, text=f"{entry.epochs_trained} {self._tr('epochs_label')}  Loss={entry.last_loss:.4f}",
                          font=("Segoe UI", 11), text_color=("gray50", "gray40")).grid(row=1, column=0, sticky="w")
         actions = ctk.CTkFrame(card, fg_color="transparent")
         actions.grid(row=2, column=0, sticky="ew", padx=14, pady=(6, 10))
@@ -695,16 +695,16 @@ class MinecraftStructureApp(ctk.CTk):
         header = ctk.CTkFrame(dialog, fg_color="transparent")
         header.grid(row=0, column=0, sticky="ew", padx=20, pady=(20, 12))
         header.grid_columnconfigure(0, weight=1)
-        icon = {"transformer": "⚡", "diffusion": "🌀", "transformer_diffusion": "🤖"}.get(entry.model_type, "📦")
+        icon = {"transformer": "TF", "diffusion": "DF", "transformer_diffusion": "TF-DF"}.get(entry.model_type, "MD")
         ctk.CTkLabel(header, text=self._tr("train_more_header", icon=icon, name=name), font=("Segoe UI", 16, "bold")).grid(row=0, column=0, sticky="w")
 
         info_frame = ctk.CTkFrame(dialog, fg_color=("gray90", "gray15"), corner_radius=6)
         info_frame.grid(row=1, column=0, sticky="ew", padx=20, pady=(0, 16))
         info_frame.grid_columnconfigure(0, weight=1)
         gs = f"{entry.grid_size[0]}×{entry.grid_size[1]}×{entry.grid_size[2]}"
-        info_text = f"📐 {gs}  |  🏷️ {entry.model_type.upper()}"
+        info_text = f"{gs}  |  {entry.model_type.upper()}"
         if entry.epochs_trained > 0:
-            info_text += f"\n📊 {entry.epochs_trained} {self._tr('epochs_label')}  |  Loss: {entry.last_loss:.4f}"
+            info_text += f"\n{entry.epochs_trained} {self._tr('epochs_label')}  |  Loss: {entry.last_loss:.4f}"
         ctk.CTkLabel(info_frame, text=info_text, font=("Segoe UI", 11), justify="left").grid(row=0, column=0, sticky="w", padx=14, pady=10)
 
         params = ctk.CTkFrame(dialog, fg_color="transparent")
@@ -732,7 +732,7 @@ class MinecraftStructureApp(ctk.CTk):
         aug_vertical_switch.grid(row=5, column=0, columnspan=3, sticky="w", pady=(4, 0))
 
         gpu_avail = torch.cuda.is_available() and self.config.gpu_enabled
-        gpu_text = f"GPU: {'✅ CUDA verfügbar' if gpu_avail else '❌ CPU only'}" if self.config.language == "de" else f"GPU: {'✅ CUDA available' if gpu_avail else '❌ CPU only'}"
+        gpu_text = f"GPU: {'CUDA verfuegbar' if gpu_avail else 'CPU only'}" if self.config.language == "de" else f"GPU: {'CUDA available' if gpu_avail else 'CPU only'}"
         ctk.CTkLabel(params, text=gpu_text,
                      font=("Segoe UI", 11), text_color="#34d399" if gpu_avail else "#f87171",
                      ).grid(row=6, column=0, columnspan=3, sticky="w", pady=(8, 0))
@@ -1063,7 +1063,7 @@ class MinecraftStructureApp(ctk.CTk):
             cache_sel_frame, values=[self._tr("no_cache")], font=("Segoe UI", 10),
             command=self._on_cache_selection_change, width=160)
         self.tf_cache_selector.grid(row=0, column=1, sticky="w")
-        ctk.CTkButton(cache_sel_frame, text="🔄", font=("Segoe UI", 10),
+        ctk.CTkButton(cache_sel_frame, text="Refresh", font=("Segoe UI", 10),
                       width=30, height=26, fg_color="#334155", hover_color="#475569",
                       command=self._refresh_cache_list).grid(row=0, column=2, padx=(4, 0))
         row += 1
@@ -1090,7 +1090,7 @@ class MinecraftStructureApp(ctk.CTk):
         ctk.CTkLabel(panel, text=self._tr("unet_preset"), font=("Segoe UI", 13, "bold")).grid(
             row=row, column=0, columnspan=3, sticky="w", pady=(10, 4))
         row += 1
-        self.tf_preset_var = ctk.StringVar(value="🐣 Tiny (0.5M)")
+        self.tf_preset_var = ctk.StringVar(value="Tiny (0.5M)")
         preset_frame = ctk.CTkFrame(panel, fg_color="transparent")
         preset_frame.grid(row=row, column=0, columnspan=3, sticky="ew", pady=(0, 6))
         for i, (label, channels, ch_mult, d_model, ca_heads) in enumerate(TF_DIFFUSION_PRESETS):
@@ -1145,9 +1145,9 @@ class MinecraftStructureApp(ctk.CTk):
         row += 1
         preset_frame = ctk.CTkFrame(panel, fg_color="transparent")
         preset_frame.grid(row=row, column=0, columnspan=3, sticky="ew", pady=(0, 8))
-        for i, (label, val) in enumerate([("🐣 Tiny (1.7M)", 1.7), ("🔹 Small (3.9M)", 3.9),
-                                          ("🔶 Medium (7.5M)", 7.5), ("🔴 Large (20M)", 20),
-                                          ("💎 XL (45M)", 45), ("🚀 XXL (117M)", 117)]):
+        for i, (label, val) in enumerate([("Tiny (1.7M)", 1.7), ("Small (3.9M)", 3.9),
+                                          ("Medium (7.5M)", 7.5), ("Large (20M)", 20),
+                                          ("XL (45M)", 45), ("XXL (117M)", 117)]):
             ctk.CTkButton(preset_frame, text=label, font=("Segoe UI", 10), width=110, height=28,
                           command=lambda v=val: self._set_model_size(v)).grid(row=i // 3, column=i % 3, padx=2, pady=1)
         row += 1
@@ -1716,7 +1716,7 @@ class MinecraftStructureApp(ctk.CTk):
                     self.tf_diffusion_model = model
                     self.current_tf_diffusion_name = tf_diff_name
                     loaded_any = True
-                    msg_parts.append(f"✅ TF-Diffusion ({tf_diff_name})")
+                    msg_parts.append(f"TF-Diffusion ({tf_diff_name})")
 
             # ── Load Transformer ──
             if tf_name:
@@ -1739,7 +1739,7 @@ class MinecraftStructureApp(ctk.CTk):
                     self.transformer_model = model
                     self.current_transformer_name = tf_name
                     loaded_any = True
-                    msg_parts.append(f"✅ Transformer ({tf_name})")
+                    msg_parts.append(f"Transformer ({tf_name})")
 
             # ── Load Diffusion ──
             if df_name:
@@ -1777,7 +1777,7 @@ class MinecraftStructureApp(ctk.CTk):
                     self.diffusion_model = model
                     self.current_diffusion_name = df_name
                     loaded_any = True
-                    msg_parts.append(f"✅ Diffusion ({df_name})")
+                    msg_parts.append(f"Diffusion ({df_name})")
 
             status = " | ".join(msg_parts) if loaded_any else self._tr("status_no_model")
         except Exception as e:
@@ -1999,7 +1999,7 @@ class MinecraftStructureApp(ctk.CTk):
                     except Exception:
                         pass
                 self.project_listbox.insert("end", f"{i+1}. {proj.name}\n")
-                self.project_listbox.insert("end", f"   📝 {pt}\n\n")
+                self.project_listbox.insert("end", f"   {pt}\n\n")
         self.project_listbox.configure(state="disabled")
 
     def _load_selected_project(self):

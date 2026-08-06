@@ -126,11 +126,11 @@ def get_pip_url() -> str:
 
 def download_file(url: str, target_path: Path) -> None:
     """Lädt eine Datei herunter und zeigt Fortschritt."""
-    print(f"  ⬇️  {url.split('/')[-1]} ...")
+    print(f"  {url.split('/')[-1]} ...")
     try:
         urllib.request.urlretrieve(url, target_path)
     except Exception as e:
-        print(f"  ❌ Fehler beim Download: {e}")
+        print(f"  Fehler beim Download: {e}")
         raise
 
 
@@ -141,16 +141,16 @@ def ensure_dir(path: Path) -> None:
 
 def copy_project_files() -> None:
     """Kopiert alle relevanten Projekt-Dateien in die Distribution."""
-    print("\n📂 Kopiere Projektdateien ...")
+    print("\nKopiere Projektdateien ...")
     
     for filename in PROJECT_FILES_TO_COPY:
         src = PROJECT_ROOT / filename
         dst = DIST_DIR / filename
         if src.exists():
             shutil.copy2(src, dst)
-            print(f"   ✓ {filename}")
+            print(f"   {filename}")
         else:
-            print(f"   ⚠️  Fehlt: {filename}")
+            print(f"   Fehlt: {filename}")
 
     for dirname in PROJECT_DIRS_TO_COPY:
         src = PROJECT_ROOT / dirname
@@ -162,9 +162,9 @@ def copy_project_files() -> None:
                 src, dst,
                 ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
             )
-            print(f"   ✓ {dirname}/")
+            print(f"   {dirname}/")
         else:
-            print(f"   ⚠️  Fehlt: {dirname}/")
+            print(f"   Fehlt: {dirname}/")
 
     # Kopiere den runs/ Ordner (trainierte Modelle) falls vorhanden
     src_runs = PROJECT_ROOT / "runs"
@@ -176,9 +176,9 @@ def copy_project_files() -> None:
             src_runs, dst_runs,
             ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.log"),
         )
-        print(f"   ✓ runs/ (trainierte Modelle)")
+        print(f"   runs/ (trainierte Modelle)")
     else:
-        print(f"   ⚠️  Kein runs/ Ordner – trainiere zuerst Modelle!")
+        print(f"   Kein runs/ Ordner - trainiere zuerst Modelle!")
 
     # Kopiere Trainingsdaten-Verzeichnisse
     for train_dir in TRAINING_DATA_DIRS:
@@ -187,16 +187,16 @@ def copy_project_files() -> None:
         if src_train.exists():
             if dst_train.exists():
                 shutil.rmtree(dst_train)
-            print(f"   📦 Kopiere {train_dir}/ ...")
+            print(f"   Kopiere {train_dir}/ ...")
             shutil.copytree(
                 src_train, dst_train,
                 ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
             )
             # Zähle .schem-Dateien
             schem_count = len(list(dst_train.rglob("*.schem")))
-            print(f"     ✓ {train_dir}/ ({schem_count} .schem-Dateien)")
+            print(f"     {train_dir}/ ({schem_count} .schem-Dateien)")
         else:
-            print(f"   ⚠️  Fehlt: {train_dir}/")
+            print(f"   Fehlt: {train_dir}/")
 
 
 def _download_and_extract_python(version: str, arch: str, python_dir: Path) -> Optional[Path]:
@@ -206,14 +206,14 @@ def _download_and_extract_python(version: str, arch: str, python_dir: Path) -> O
     zip_path = TEMP_DIR / f"python-{version}-embed-{arch}.zip"
     
     if not zip_path.exists():
-        print(f"\n   📥 Lade embedded Python herunter ({version}) ...")
+        print(f"\n   Lade embedded Python herunter ({version}) ...")
         try:
             download_file(url, zip_path)
         except Exception as e:
-            print(f"   ⚠️  Konnte Python {version} nicht herunterladen: {e}")
+            print(f"   Konnte Python {version} nicht herunterladen: {e}")
             return None
     else:
-        print(f"   📦 Verwende gecachte Python: {zip_path}")
+        print(f"   Verwende gecachte Python: {zip_path}")
     
     # Leeres Zielverzeichnis
     if python_dir.exists():
@@ -221,18 +221,18 @@ def _download_and_extract_python(version: str, arch: str, python_dir: Path) -> O
     ensure_dir(python_dir)
     
     # Entpacken
-    print("   📦 Entpacke Python ...")
+    print("   Entpacke Python ...")
     with zipfile.ZipFile(zip_path, 'r') as zf:
         zf.extractall(python_dir)
     
     # Fix: Entferne die _pth-Datei, damit site-packages geladen werden
     for pth_file in python_dir.glob("*._pth"):
-        print(f"   🔧 Entferne {pth_file.name} (Site-Packages aktivieren)")
+        print(f"   Entferne {pth_file.name} (Site-Packages aktivieren)")
         pth_file.rename(pth_file.with_suffix("._pth.disabled"))
     
     python_exe = python_dir / "python.exe"
     if not python_exe.exists():
-        print(f"   ❌ python.exe nicht gefunden in {python_dir}")
+        print(f"   python.exe nicht gefunden in {python_dir}")
         return None
     
     return python_exe
@@ -242,7 +242,7 @@ def _install_pip_and_packages(python_exe: Path) -> bool:
     """Installiere pip und alle benötigten Pakete in das embedded Python.
     Gibt True bei Erfolg zurück."""
     # Installiere pip
-    print("\n   📥 Installiere pip ...")
+    print("\n   Installiere pip ...")
     pip_path = TEMP_DIR / "get-pip.py"
     if not pip_path.exists():
         download_file(get_pip_url(), pip_path)
@@ -253,7 +253,7 @@ def _install_pip_and_packages(python_exe: Path) -> bool:
         cwd=python_exe.parent,
     )
     if result.returncode != 0:
-        print("   ⚠️  pip-Installation fehlgeschlagen")
+        print("   pip-Installation fehlgeschlagen")
         return False
     
     # Installiere Pakete
@@ -281,20 +281,20 @@ def setup_embedded_python() -> None:
     python_dir = DIST_DIR / "python"
     
     for version in versions_to_try:
-        print(f"\n🐍 Versuche embedded Python {version} ({arch}) ...")
+        print(f"\nVersuche embedded Python {version} ({arch}) ...")
         python_exe = _download_and_extract_python(version, arch, python_dir)
         if python_exe is None:
             continue
         
         if _install_pip_and_packages(python_exe):
-            print(f"\n   ✅ Embedded Python {version} erfolgreich eingerichtet!")
+            print(f"\n   Embedded Python {version} erfolgreich eingerichtet!")
             return
         else:
-            print(f"   ⚠️  Paketinstallation in {version} fehlgeschlagen")
+            print(f"   Paketinstallation in {version} fehlgeschlagen")
     
     # Alles fehlgeschlagen -> Fallback auf System-Python
-    print(f"\n   🤔 Konnte keine embedded Python-Version herunterladen.")
-    print(f"   🤔 Verwende installiertes Python als Basis ...")
+    print(f"\n   Konnte keine embedded Python-Version herunterladen.")
+    print(f"   Verwende installiertes Python als Basis ...")
     _use_installed_python(python_dir)
 
 
@@ -304,7 +304,7 @@ def _use_installed_python(python_dir: Path) -> None:
     Kopiert python.exe + benötigte DLLs in das portable Verzeichnis
     und installiert alle benötigten Pakete per pip.
     """
-    print("\n   🔧 Verwende installiertes Python als Basis ...")
+    print("\n   Verwende installiertes Python als Basis ...")
     
     python_exe = Path(sys.executable)
     
@@ -312,7 +312,7 @@ def _use_installed_python(python_dir: Path) -> None:
     ensure_dir(python_dir)
     
     # Kopiere python.exe
-    print("   📄 Kopiere python.exe ...")
+    print("   Kopiere python.exe ...")
     shutil.copy2(str(python_exe), str(python_dir / "python.exe"))
     
     # Kopiere notwendige DLLs vom Python-Root
@@ -359,11 +359,11 @@ def main():
             # Letzte Zeile der Fehlerausgabe
             err_lines = [l for l in result.stderr.splitlines() if l.strip()]
             err_msg = err_lines[-1] if err_lines else "Unbekannter Fehler"
-            print(f"  ⚠️  {{pkg}}: {{err_msg}}")
+            print(f"  {{pkg}}: {{err_msg}}")
         else:
-            print(f"  ✓ {{pkg}}")
+            print(f"  {{pkg}}")
     
-    print("\\n✅ Paketinstallation abgeschlossen")
+    print("\\nPaketinstallation abgeschlossen")
 
 if __name__ == "__main__":
     main()
@@ -372,7 +372,7 @@ if __name__ == "__main__":
     
     # Führe das Installationsskript mit dem SYSTEM-Python aus
     # (damit pip verfügbar ist)
-    print("   📦 Installiere Pakete (mit Abhängigkeiten) ...")
+    print("   Installiere Pakete (mit Abhängigkeiten) ...")
     result = subprocess.run(
         [str(python_exe), str(install_script)],
         check=False, capture_output=True, text=True,
@@ -383,7 +383,7 @@ if __name__ == "__main__":
         # Zeige nur relevante Fehler
         for line in result.stderr.splitlines():
             if "error" in line.lower() or "warning" in line.lower():
-                print(f"   ⚠️  {line}")
+                print(f"   {line}")
     
     # Erstelle .pth-Datei
     _fix_pth_files(python_dir)
@@ -408,11 +408,11 @@ for p in [SITE_PACKAGES, PROJECT_ROOT]:
         sys.path.insert(0, p_str)
 '''
     config_script.write_text(config_content, encoding="utf-8")
-    print(f"   ✓ _python_config.py")
+    print(f"   _python_config.py")
     
     # Aufräumen
     install_script.unlink()
-    print(f"   🧹 Installationsskript aufgeräumt")
+    print(f"   Installationsskript aufgeräumt")
 
 
 def _fix_pth_files(python_dir: Path) -> None:
@@ -423,15 +423,15 @@ def _fix_pth_files(python_dir: Path) -> None:
         f.write("Lib/site-packages\n")
         f.write("../../\n")
         f.write("../\n")
-    print(f"   🔧 Erstelle {pth_path.name}")
+    print(f"   Erstelle {pth_path.name}")
 
 
 def _install_packages(python_exe: Path) -> None:
     """Installiert alle benötigten Pakete in das embedded Python."""
-    print("\n   📦 Installiere Pakete ...")
+    print("\n   Installiere Pakete ...")
     
     for pkg in REQUIRED_PACKAGES:
-        print(f"     → {pkg}")
+        print(f"     -> {pkg}")
         result = subprocess.run(
             [str(python_exe), "-m", "pip", "install",
              "--no-warn-script-location",
@@ -440,10 +440,10 @@ def _install_packages(python_exe: Path) -> None:
             cwd=python_exe.parent,
         )
         if result.returncode != 0:
-            print(f"       ⚠️  {result.stderr.splitlines()[-1] if result.stderr else 'Fehler'}")
+            print(f"       {result.stderr.splitlines()[-1] if result.stderr else 'Fehler'}")
     
     # Überprüfe Installation
-    print("\n   🔍 Überprüfe Installation ...")
+    print("\n   Überpruefe Installation ...")
     result = subprocess.run(
         [str(python_exe), "-m", "pip", "list", "--format=json"],
         check=False, capture_output=True, text=True,
@@ -451,14 +451,14 @@ def _install_packages(python_exe: Path) -> None:
     )
     if result.returncode == 0:
         packages = json.loads(result.stdout)
-        print(f"     ✓ {len(packages)} Pakete installiert")
+        print(f"     {len(packages)} Pakete installiert")
         for pkg in packages:
-            print(f"       • {pkg['name']}=={pkg['version']}")
+            print(f"       - {pkg['name']}=={pkg['version']}")
 
 
 def create_launcher_bat() -> None:
     """Erstellt die Haupt-Startdatei für die portable Distribution."""
-    print("\n🪟 Erstelle Startdatei (Batch) ...")
+    print("\nErstelle Startdatei (Batch) ...")
     
     launcher_content = r"""@echo off
 title Minecraft Structure Generator (Portable)
@@ -518,7 +518,7 @@ if !errorlevel! neq 0 (
     
     launcher_path = DIST_DIR / "start_minecraft_generator.bat"
     launcher_path.write_text(launcher_content, encoding="utf-8")
-    print(f"   ✓ {launcher_path.name}")
+    print(f"   {launcher_path.name}")
 
 
 def create_python_loader_script() -> None:
@@ -593,49 +593,49 @@ if __name__ == "__main__":
 '''
     loader_path = DIST_DIR / "run_portable.py"
     loader_path.write_text(loader_content, encoding="utf-8")
-    print(f"   ✓ {loader_path.name}")
+    print(f"   {loader_path.name}")
 
 
 def create_readme() -> None:
     """Erstellt eine README für die portable Distribution."""
     readme_content = f"""# Minecraft Structure Generator – Portable Edition
 
-## ⚡ Schnellstart
+## Schnellstart
 1. **Entpacken** Sie das gesamte Archiv
 2. **Doppelklick** auf `start_minecraft_generator.bat`
 3. **Warten** bis das Fenster erscheint (beim ersten Start werden
    ggf. Komponenten vorbereitet)
 4. **Prompt eingeben** und auf *Generieren* klicken
 
-## 📦 Systemvoraussetzungen
+## Systemvoraussetzungen
 - **Betriebssystem:** Windows 10 oder höher (64-Bit)
 - **Speicher:** ~4 GB freier Festplattenspeicher (nach Entpacken)
 - **RAM:** 8 GB empfohlen
 - **GPU (optional):** NVIDIA Grafikkarte mit CUDA-Unterstützung
   für schnellere Generierung
 
-## 🧠 Enthaltene Komponenten
+## Enthaltene Komponenten
 - **Python {get_python_version()}** (portabel, ohne System-Installation)
 - **PyTorch** (GPU-beschleunigt falls CUDA verfügbar)
 - **CustomTkinter** (moderne GUI)
 - **Alle weiteren Abhängigkeiten**
 
-## 📁 Verzeichnisstruktur
+## Verzeichnisstruktur
 ```
 MinecraftStructureGenerator_Portable/
-├── start_minecraft_generator.bat   ← STARTEN
-├── run_portable.py                 ← Python-Loader (automatisch)
-├── python/                         ← Embedded Python
+├── start_minecraft_generator.bat   (STARTEN)
+├── run_portable.py                 (Python-Loader, automatisch)
+├── python/                         (Embedded Python)
 │   ├── python.exe
 │   └── ...
-├── gui_app.py                      ← Hauptanwendung
-├── dataset.py, model.py, ...       ← Quellcode
-├── app/                            ← App-Module
-├── runs/                           ← Trainierte Modelle
-└── exports/                        ← Generierte Bauwerke
+├── gui_app.py                      (Hauptanwendung)
+├── dataset.py, model.py, ...       (Quellcode)
+├── app/                            (App-Module)
+├── runs/                           (Trainierte Modelle)
+└── exports/                        (Generierte Bauwerke)
 ```
 
-## 🎮 Verwendung
+## Verwendung
 1. Wählen Sie ein Modell aus (Dropdown oben rechts)
 2. Geben Sie eine Baubeschreibung ein (Englisch)
    - Z.B. "small medieval wooden cottage with stone foundation"
@@ -644,35 +644,35 @@ MinecraftStructureGenerator_Portable/
 5. Ergebnis als `.schem`-Datei speichern
    (mit WorldEdit oder Litematica in Minecraft laden)
 
-## ⚙️ Erweiterte Optionen
+## Erweiterte Optionen
 - **Temperatur** (0.1–1.5): Höher = kreativer/unvorhersehbarer
 - **Top-K** (5–100): Begrenzt die Auswahl auf die K wahrscheinlichsten Blöcke
 - **Modell-Größe:** 16×16×16, 32×32×32 oder 48×48×48
 
-## 🏗️ Bauwerke in Minecraft laden
+## Bauwerke in Minecraft laden
 1. Minecraft starten
 2. WorldEdit oder Litematica installieren
 3. `.schem`-Datei in den entsprechenden Ordner kopieren
 4. Mit `//schem load dateiname.schem` laden
 
-## 🐛 Fehlerbehebung
-- **"python.exe nicht gefunden"** → Distribution nicht vollständig entpackt
-- **"Kein Modell gefunden"** → runs/ Ordner fehlt (trainierte Modelle)
-- **GUI startet nicht** → Terminal öffnen und `start_minecraft_generator.bat`
+## Fehlerbehebung
+- **"python.exe nicht gefunden"** - Distribution nicht vollständig entpackt
+- **"Kein Modell gefunden"** - runs/ Ordner fehlt (trainierte Modelle)
+- **GUI startet nicht** - Terminal öffnen und `start_minecraft_generator.bat`
   darin ausführen, um Fehlermeldungen zu sehen
 
-## 📄 Lizenz
+## Lizenz
 MIT – siehe LICENSE-Datei im Hauptprojekt
 """
     
     readme_path = DIST_DIR / "README_PORTABLE.txt"
     readme_path.write_text(readme_content, encoding="utf-8")
-    print(f"   ✓ {readme_path.name}")
+    print(f"   {readme_path.name}")
 
 
 def create_main_launcher() -> None:
     """Erstellt die verbesserte Batch-Datei, die den Python-Loader nutzt."""
-    print("\n🪟 Erstelle Haupt-Startdatei ...")
+    print("\nErstelle Haupt-Startdatei ...")
     
     launcher_content = r"""@echo off
 title Minecraft Structure Generator (Portable)
@@ -743,14 +743,14 @@ if errorlevel 1 (
     
     launcher_path = DIST_DIR / "start_minecraft_generator.bat"
     launcher_path.write_text(launcher_content, encoding="utf-8")
-    print(f"   ✓ {launcher_path.name}")
+    print(f"   {launcher_path.name}")
 
 
 def create_build_info() -> None:
     """Erstellt eine build_info.json mit Metadaten zur Distribution."""
     info = {
         "app_name": "Minecraft Structure Generator",
-        "version": "2.1.0",
+        "version": "0.1",
         "build_date": __import__("datetime").datetime.now().isoformat(),
         "python_version": get_python_version(),
         "architecture": get_arch(),
@@ -763,7 +763,7 @@ def create_build_info() -> None:
     
     info_path = DIST_DIR / "build_info.json"
     info_path.write_text(json.dumps(info, indent=2), encoding="utf-8")
-    print(f"   ✓ build_info.json")
+    print(f"   build_info.json")
 
 
 def verify_distribution() -> list[str]:
@@ -781,22 +781,22 @@ def verify_distribution() -> list[str]:
     
     for fname in essential_files:
         if not (DIST_DIR / fname).exists():
-            warnings.append(f"❌ Fehlt: {fname}")
+            warnings.append(f"Fehlt: {fname}")
     
     # Prüfe Python
     python_exe = DIST_DIR / "python" / "python.exe"
     if not python_exe.exists():
-        warnings.append("⚠️  Embedded Python nicht gefunden (python/python.exe)")
+        warnings.append("Embedded Python nicht gefunden (python/python.exe)")
     
     # Prüfe runs/ Ordner
     runs_dir = DIST_DIR / "runs"
     if not runs_dir.exists() or not any(runs_dir.iterdir()):
-        warnings.append("⚠️  Keine trainierten Modelle gefunden (runs/)")
+        warnings.append("Keine trainierten Modelle gefunden (runs/)")
     
     # Prüfe auf Modell-Checkpoints
     checkpoints = list(DIST_DIR.rglob("model.pt"))
     if not checkpoints:
-        warnings.append("⚠️  Keine model.pt Checkpoints gefunden")
+        warnings.append("Keine model.pt Checkpoints gefunden")
     
     # Berechne Größe
     total_size = sum(
@@ -804,7 +804,7 @@ def verify_distribution() -> list[str]:
         if f.is_file()
     )
     size_mb = total_size / (1024 * 1024)
-    warnings.append(f"📊 Gesamtgröße: {size_mb:.1f} MB")
+    warnings.append(f"Gesamtgroesse: {size_mb:.1f} MB")
     
     return warnings
 
@@ -813,7 +813,7 @@ def cleanup_temp() -> None:
     """Räumt temporäre Dateien auf."""
     if TEMP_DIR.exists():
         shutil.rmtree(TEMP_DIR)
-        print("\n🧹 Temporäre Dateien bereinigt")
+        print("\nTemporaere Dateien bereinigt")
 
 
 def build() -> None:
@@ -821,11 +821,11 @@ def build() -> None:
     print("=" * 60)
     print("  Minecraft Structure Generator – Portable Builder")
     print("=" * 60)
-    print(f"\n📦 Ziel: {DIST_DIR}")
+    print(f"\nZiel: {DIST_DIR}")
     
     # Alte Distribution entfernen
     if DIST_DIR.exists():
-        print("\n🗑️  Entferne alte Distribution ...")
+        print("\nEntferne alte Distribution ...")
         shutil.rmtree(DIST_DIR)
     
     # Verzeichnisse erstellen
@@ -836,7 +836,7 @@ def build() -> None:
     copy_project_files()
     
     # 2. Embedded Python einrichten
-    print("\n🏗️  Richte portable Python-Umgebung ein ...")
+    print("\nRichte portable Python-Umgebung ein ...")
     setup_embedded_python()
     
     # 3. Launcher erstellen
@@ -847,20 +847,20 @@ def build() -> None:
     
     # 4. Verifikation
     print("\n" + "=" * 60)
-    print("  ✅ Distribution erstellt!")
+    print("  Distribution erstellt!")
     print("=" * 60)
     
     warnings = verify_distribution()
     for warning in warnings:
-        if warning.startswith("📊"):
+        if warning.startswith("Gesamtgroesse"):
             print(warning)
-        elif warning.startswith("❌"):
+        elif warning.startswith("Fehlt"):
             print(f"\n{warning}")
-        elif warning.startswith("⚠️"):
+        elif warning.startswith("Embedded") or warning.startswith("Keine"):
             print(f"\n{warning}")
     
-    print(f"\n📂 Ausgabe: {DIST_DIR}")
-    print("\n👉 Zum Starten: Doppelklick auf")
+    print(f"\nAusgabe: {DIST_DIR}")
+    print("\nZum Starten: Doppelklick auf")
     print(f"   {DIST_DIR / 'start_minecraft_generator.bat'}")
     print()
 

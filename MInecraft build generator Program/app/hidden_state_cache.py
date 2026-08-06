@@ -93,7 +93,7 @@ def compute_hidden_states(
         for pi, prompt in enumerate(prompts):
             processed += 1
             if status_callback:
-                status_callback(f"📥 Encodiere {processed}/{total_prompts}: {schem_path.name} prompt {pi+1}/{len(prompts)}")
+                status_callback(f"Encodiere {processed}/{total_prompts}: {schem_path.name} prompt {pi+1}/{len(prompts)}")
 
             # Encode prompt
             with torch.no_grad():
@@ -147,7 +147,7 @@ def compute_hidden_states(
     (out_dir / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 
     if status_callback:
-        status_callback(f"✅ {len(all_hidden_states)} Hidden States ({total_prompts} Prompts, {len(schem_files)} Dateien)")
+        status_callback(f"{len(all_hidden_states)} Hidden States ({total_prompts} Prompts, {len(schem_files)} Dateien)")
 
     return out_dir
 
@@ -222,20 +222,20 @@ def validate_cache(encoder_name: str, schem_files: List[Path], txt_files: List[P
     }
 
     if not cache_dir.exists():
-        result["message"] = "❌ Kein Cache vorhanden"
+        result["message"] = "Kein Cache vorhanden"
         result["missing"] = total_prompts
         return result
 
     meta_path = cache_dir / "metadata.json"
     if not meta_path.exists():
-        result["message"] = "❌ Cache beschädigt (keine metadata.json)"
+        result["message"] = "Cache beschädigt (keine metadata.json)"
         result["missing"] = total_prompts
         return result
 
     try:
         metadata = json.loads(meta_path.read_text(encoding="utf-8"))
     except Exception:
-        result["message"] = "❌ Cache beschädigt (metadata.json ungültig)"
+        result["message"] = "Cache beschädigt (metadata.json ungültig)"
         result["missing"] = total_prompts
         return result
 
@@ -287,7 +287,7 @@ def validate_cache(encoder_name: str, schem_files: List[Path], txt_files: List[P
     result["valid"] = (result["missing"] == 0 and result["changed"] == 0)
 
     if result["valid"]:
-        result["message"] = f"✅ Cache aktuell ({result['cached']} Hidden States, {result['num_files']} Dateien)"
+        result["message"] = f"Cache aktuell ({result['cached']} Hidden States, {result['num_files']} Dateien)"
     else:
         parts = []
         if new_files:
@@ -296,7 +296,7 @@ def validate_cache(encoder_name: str, schem_files: List[Path], txt_files: List[P
             parts.append(f"{len(deleted)} gelöschte Dateien")
         if changed_files:
             parts.append(f"{len(changed_files)} geänderte Dateien")
-        result["message"] = f"⚠️ Cache nicht aktuell: {', '.join(parts)}"
+        result["message"] = f"Cache nicht aktuell: {', '.join(parts)}"
     
     return result
 
