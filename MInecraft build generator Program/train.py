@@ -45,7 +45,7 @@ def main() -> None:
     parser.add_argument("--max-voxels", type=int, default=400_000)
     parser.add_argument("--out-dir", default=None,
                         help="Output directory. If not set, auto-selected based on --model-size.")
-    parser.add_argument("--model-size", type=str, default="16",
+    parser.add_argument("--model-size", type=str, default=None,
                         choices=list(ALLOWED_GRID_SIZES.keys()),
                         help="Model/Grid size: 16 = 16x16x16, 32 = 32x32x32, 48 = 48x48x48, etc.")
     parser.add_argument("--grid-size", type=parse_size, default=None,
@@ -67,13 +67,17 @@ def main() -> None:
                         help="Allow augmented builds to move upward inside the training grid.")
     args = parser.parse_args()
 
-    # Grid-Größe bestimmen: --model-size hat Vorrang, falls nicht gesetzt dann --grid-size, sonst default 16
+    # Grid-Größe bestimmen: --model-size hat Vorrang, sonst --grid-size (deprecated),
+    # sonst Standard 16. Wichtig: --grid-size war zuvor unerreichbar, weil die "Nicht None für
+    # --model-size. --grid-size löst nun die passende Modell-Größe auf.
     if args.model_size is not None:
         grid_size = ALLOWED_GRID_SIZES[args.model_size]
     elif args.grid_size is not None:
         grid_size = args.grid_size
+        args.model_size = next((s for s, v in ALLOWED_GRID_SIZES.items() if v == grid_size), None)
     else:
-        grid_size = (16, 16, 16)
+        grid_size = ALLOWED_GRID_SIZES["16"]
+        args.model_size = "16"
 
     if args.out_dir is not None:
         out_dir = Path(args.out_dir)

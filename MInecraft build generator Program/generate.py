@@ -45,7 +45,7 @@ def main() -> None:
     parser.add_argument("--run-dir", default=None,
                         help="Run directory with model.pt. If not set, auto-selected based on --model-size.")
     parser.add_argument("--output", default="generated.schem")
-    parser.add_argument("--model-size", type=str, default="16",
+    parser.add_argument("--model-size", type=str, default=None,
                         choices=list(ALLOWED_GRID_SIZES.keys()),
                         help="Model size: 16 = 16x16x16, 32 = 32x32x32, 48 = 48x48x48, 64 = 64x64x64, 96 = 96x96x96, 128 = 128x128x128, 256 = 256x256x256")
     parser.add_argument("--grid-size", type=parse_size, default=None,
@@ -55,19 +55,21 @@ def main() -> None:
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
 
-    # Run-Dir bestimmen: Falls nicht gesetzt, automatisch anhand der Modell-Größe
+    # --model-size bevorzugt; --grid-size (deprecated) wird sonst aufgelöst.
+    # --grid-size war zuvor unerreichbar, weil --model-size nie None war.
+    if args.model_size is None and args.grid_size is not None:
+        args.model_size = next((s for s, v in ALLOWED_GRID_SIZES.items() if v == args.grid_size), "16")
+    if args.model_size is None:
+        args.model_size = "16"
+
+    # Run-Dir bestimmen: Falls nicht gesetzt, wird es anhand der Modell-Größe gewählt
     if args.run_dir is not None:
         run_dir = Path(args.run_dir)
     else:
         run_dir = Path(ALLOWED_GRID_RUN_DIRS.get(args.model_size, "runs/voxel_transformer_scaled"))
 
-    # Grid-Größe aus Modell-Größe oder Argument
-    if args.model_size is not None:
-        grid_size = ALLOWED_GRID_SIZES[args.model_size]
-    elif args.grid_size is not None:
-        grid_size = args.grid_size
-    else:
-        grid_size = None  # wird später aus checkpoint gelesen
+    # Grid-Größe aus Modell-Größe (--grid-size wird über args.model_size aufgelöst)
+    grid_size = ALLOWED_GRID_SIZES[args.model_size]
 
     checkpoint = torch.load(run_dir / "model.pt", map_location="cpu")
     prompt_tokenizer = PromptTokenizer.load(run_dir / "prompt_vocab.json")

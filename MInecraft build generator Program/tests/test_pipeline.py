@@ -43,7 +43,7 @@ def test_tokenizers_and_schem_roundtrip():
     loaded = load_schematic(out)
     assert loaded.size == (2, 2, 2)
     assert set(loaded.blocks) == {"minecraft:air", "minecraft:stone", "minecraft:oak_planks"}
-    assert "Schematic" in File.load(out, gzipped=True)
+    assert "Schematic" in File.load(out, gzipped=True)[""]
 
 
 def test_prompt_tokenizer_padding():

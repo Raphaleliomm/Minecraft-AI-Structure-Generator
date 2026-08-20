@@ -12,7 +12,6 @@ pre-trained Text-Encoder (Phi-3.5, Gemma 2/3, Flan-T5).
 - **3D-Vorschau**: Echtzeit-3D-Ansicht generierter Bauwerke (pyglet/OpenGL)
 - **Training**: Integriertes Training mit Augmentierung, Sampling-Gewichten und mehr
 - **Kaggle-Export**: Erstelle Kaggle-Notebooks für Cloud-Training
-- **Portable Build**: Erstelle eine portable Windows-Distribution mit `build_portable.py`
 
 ## Schnellstart
 
@@ -56,10 +55,8 @@ python train.py --data-dir "Trainingsdaten good thoroughly analyzed" --model-siz
 ├── model.py                      # Shared-Weight-Voxel-Transformer (Single-Pass)
 ├── train.py                      # Kommandozeilen-Training (Transformer)
 ├── generate.py                   # Kommandozeilen-Generierung (Transformer)
-├── augment_data.py               # Datenaugmentierung (Spiegelung, Rotation)
 ├── filter_dataset.py             # Dataset-Filterung nach Größe
 ├── kaggle_export.py              # Export für Kaggle-Notebooks
-├── build_portable.py             # Portable-Windows-Builder
 ├── config.json                   # GUI-Konfiguration
 ├── requirements.txt              # Python-Abhängigkeiten
 ├── start_app.bat                 # GUI-Starter
@@ -123,14 +120,6 @@ Installation aller Abhängigkeiten:
 ```powershell
 pip install -r requirements.txt
 ```
-
-## Portable Distribution
-
-```powershell
-python build_portable.py
-```
-
-Erzeugt eine portable Windows-Distribution mit embedded Python im `dist/`-Ordner.
 
 ## Tests
 

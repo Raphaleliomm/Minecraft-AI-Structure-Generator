@@ -1,4 +1,4 @@
-"""Kaggle Export — packt Trainingsskript, Daten und Notebook für Kaggle GPU Training."""
+"""Kaggle Export - packt Trainingsskript, Daten und Notebook für Kaggle GPU Training."""
 from __future__ import annotations
 
 import json

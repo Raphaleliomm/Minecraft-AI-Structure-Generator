@@ -23,6 +23,11 @@ BLOCK_STATE_PATTERN = re.compile(r"^([a-z0-9_:-]+)(\[.*\])?$")
 IMPORTANT_BLOCK_STATES = {"facing", "axis", "half", "waterlogged", "open", "type", "rotation", "shape", "part", "hanging", "lit"}
 
 # Block States, die entfernt werden können (nur numerische Werte, Pflanzenwachstum, etc.)
+#
+# HINWEIS: Dieses Set wird aktuell nirgends im Code angewendet – es wird bewusst als
+# tote Referenz-Liste aufbewahrt. Es dient als Vorlage, falls die KI künftig mehr
+# Blockarten/Block-Zustände bauen darf und störende numerische Zustände erlaubt
+# werden sollen. Falls nötig, kann hier die gewünschte Auswahl angepasst werden.
 UNIMPORTANT_BLOCK_STATES = {
     "age", "level", "power", "delay", "moisture", "layers",
     "stage", "distance", "persistent", "check_decay", "decayable",
@@ -1204,17 +1209,22 @@ class MultiSourceSchematicDataset(Dataset):
             key = (schem_name, pi)
             if key in cache_lookup:
                 hidden_index.append(cache_lookup[key])
-            else:
-                # Fallback: try matching by schem name only (backward compat)
-                # Find first cache entry for this schem
-                found = False
-                for i, f in enumerate(cache_files_list):
-                    if f.get("schem") == schem_name:
-                        hidden_index.append(i)
-                        found = True
-                        break
-                if not found:
-                    hidden_index.append(0)
+                continue
+
+            # Backward-Kompatibilität: Falls in der Cache genau EIN Eintrag für diese
+            # Datei liegt (Single-Prompt), ist die Zuordnung eindeutig und erlaubt.
+            matches_for_schem = [i for i, f in enumerate(cache_files_list) if f.get("schem") == schem_name]
+            if len(matches_for_schem) == 1:
+                hidden_index.append(matches_for_schem[0])
+                continue
+
+            # Keine stille Fehlausrichtung: Wenn kein passender Cache-Eintrag existiert,
+            # hart abbrechen, statt dem Beispiel fälschlich ein fremdes Hidden State (z.B.
+            # Zeile 0) zuzuordnen.
+            raise ValueError(
+                f"[Cache unvollständig] Kein Hidden-State-Eintrag für '{schem_name}' "
+                f"(Prompt {pi}). Bitte Cache neu berechnen oder einen neuen Cache anlegen."
+            )
 
         dataset.hidden_states = hidden_states
         dataset.attention_masks = attention_masks

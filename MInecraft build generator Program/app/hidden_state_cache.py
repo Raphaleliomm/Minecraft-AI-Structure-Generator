@@ -89,6 +89,7 @@ def compute_hidden_states(
         # Read and split prompts
         prompts = _split_prompts(txt_path.read_text(encoding="utf-8"))
         schem_hash = _file_hash(schem_path)
+        txt_hash = _file_hash(txt_path)
 
         for pi, prompt in enumerate(prompts):
             processed += 1
@@ -107,6 +108,7 @@ def compute_hidden_states(
                 "schem": schem_path.name,
                 "txt": txt_path.name,
                 "hash": schem_hash,
+                "txt_hash": txt_hash,
                 "prompt_index": pi,
                 "prompt_preview": prompt[:80],
             })
@@ -265,9 +267,14 @@ def validate_cache(encoder_name: str, schem_files: List[Path], txt_files: List[P
             new_files.append(schem_path.name)
         else:
             current_hash = _file_hash(schem_path)
-            # Check if hash matches ANY entry for this schem file
+            current_txt_hash = _file_hash(txt_path)
+            # Check if both schem content AND prompt-content hash match a cache entry.
+            # Older caches without txt_hash are treated as changed (must be recomputed).
             cached_entries_for_file = cache_by_schem[schem_path.name]
-            hash_matches = any(c.get("hash") == current_hash for c in cached_entries_for_file)
+            hash_matches = any(
+                c.get("hash") == current_hash and c.get("txt_hash") == current_txt_hash
+                for c in cached_entries_for_file
+            )
             if not hash_matches:
                 changed_files.append(schem_path.name)
 
