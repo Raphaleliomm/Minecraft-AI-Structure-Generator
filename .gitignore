@@ -1,0 +1,38 @@
+# ===========================================================================
+#  Minecraft AI Structure Generator - Repo-weite Ignore-Regeln
+# ===========================================================================
+
+# --- Trainingsdaten (lokale Datasets: Strukturen + Prompt-Dateien) ---------
+# "Trainingsdaten*/" deckt auf jeder Verzeichnis-Ebene ab:
+#   Trainingsdaten/
+#   Trainingsdaten_ohne_prompt/
+#   MInecraft build generator Program/Trainingsdaten good thoroughly analyzed/
+Trainingsdaten*/
+
+# Minecraft-Struktur-Formate (Scraper-Downloads / Exporte).
+# Bereits getrackte Dateien bleiben getrackt - bei Bedarf mit `git add -f` erzwingen.
+*.schem
+*.schematic
+*.litematic
+*.mcstructure
+*.mcpack
+*.nbt
+
+# Prompt-/Metadaten-Dateien der Datasets
+prompts.json
+builds_meta.jsonl
+
+# --- Scraper-/Arbeitsartefakte ---------------------------------------------
+.tmp_scrape/
+
+# --- Python / Tests ---------------------------------------------------------
+__pycache__/
+*.py[cod]
+.pytest_cache/
+pytest-cache-files-*/
+
+# --- Trainings- und Modell-Artefakte ---------------------------------------
+runs/
+exports/
+test_outputs/
+*.pt

@@ -1,5 +1,0 @@
-Can you build a small Minecraft wooden gazebo with a layered roof, hanging lanterns, open sides, and natural landscaping?
----
-small Minecraft wooden gazebo
----
-Generate a small Minecraft wooden gazebo built primarily from spruce wood, oak wood, lanterns, and oak leaves. The gazebo should have an open design with decorative support pillars, a wide sloped roof with extended overhangs, a wooden floor, a short staircase, and leaf bushes surrounding the base. Do not use stone, bricks, concrete, quartz, terracotta, copper, nether blocks, glass walls, or enclosed rooms.
