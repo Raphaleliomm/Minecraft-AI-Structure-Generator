@@ -56,6 +56,9 @@ python train.py --data-dir "Trainingsdaten good thoroughly analyzed" --model-siz
 ├── train.py                      # Kommandozeilen-Training (Transformer)
 ├── generate.py                   # Kommandozeilen-Generierung (Transformer)
 ├── filter_dataset.py             # Dataset-Filterung nach Größe
+├── scrape_phantommarket.py       # Dataset-Scraper (market.phantom-node.com)
+├── scrape_all.bat                # Starter für den Volllauf (resume-fähig)
+├── validate_schematics.py        # Validierung von .schem-Dateien (ohne nbtlib)
 ├── kaggle_export.py              # Export für Kaggle-Notebooks
 ├── config.json                   # GUI-Konfiguration
 ├── requirements.txt              # Python-Abhängigkeiten
@@ -105,6 +108,70 @@ Unterstützte Modelle (alle Gewichte frozen):
 4. Augmentierung aktivieren (Rotation, Verschiebung, vertikale Bewegung)
 5. "Training starten" klicken
 
+## Trainingsdaten von PhantomMarket laden (`scrape_phantommarket.py`)
+
+Lädt alle Builds von [market.phantom-node.com](https://market.phantom-node.com) als
+Trainingsdaten. Die **Build-Beschreibung wird dabei als Prompt** gespeichert.
+
+```powershell
+# Alle Builds als .schem + Prompt-Dateien (Standard-Ziel: ../Trainingsdaten/phantommarket)
+python scrape_phantommarket.py
+
+# oder als Doppelklick-Starter mit den Standardwerten für den Volllauf
+.\scrape_all.bat
+
+# Erst testen: 50 Builds, langsamer
+python scrape_phantommarket.py --max-builds 50 --delay 1.5
+
+# Original-Format zusätzlich zum konvertierten .schem
+python scrape_phantommarket.py --formats litematic,schem --max-file-mb 100
+
+# Nur Beschreibungen/Metadaten (schnell, keine Downloads)
+python scrape_phantommarket.py --metadata-only
+
+# prompts.json nachträglich aus builds_meta.jsonl neu ableiten
+python scrape_phantommarket.py --rebuild-prompts
+```
+
+Ausgabe-Layout (direkt als `--data-dir` nutzbar):
+
+```
+Trainingsdaten/phantommarket/
+├── builds_meta.jsonl              # alle Metadaten je Build (Resume-Grundlage)
+├── prompts.json                   # {"<datei>.schem": "<prompt>"}
+├── <slug>__Name.schem             # konvertierte Struktur (Sponge v2/v3)
+├── <slug>__Name.litematic         # optionales Original
+└── <slug>__Name.txt               # Prompt-Sidecar (name:/author:/source:/url: + ---)
+```
+
+Wichtige Optionen:
+
+| Option | Wirkung |
+| --- | --- |
+| `--out-dir` | Zielordner (Standard `../Trainingsdaten/phantommarket`) |
+| `--formats` | `litematic,schem,nbt,mcstructure,mcpack,java_world` (Standard: `schem`) |
+| `--metadata-only` | keine Struktur-Dateien, nur Beschreibungen/Metadaten |
+| `--max-builds` / `--order` | Umfang und Reihenfolge (`newest`/`oldest`/`shuffle`) |
+| `--limit` | Lauf nach N verarbeiteten Builds beenden (Resume-freundlich, für lange Vollläufe) |
+| `--delay` / `--jitter` / `--retries` | Rate-Limit und Wiederholungen (429/5xx) |
+| `--max-file-mb` | große Builds überspringen (Standard 250 MB) |
+| `--prompt-mode` | `description` (Standard), `title` oder `title+description` |
+| `--max-prompt-chars` | Prompt kappen (Standard 0 = Beschreibung unverändert) |
+| `--no-meta-lines` | `.txt` ohne Herkunftszeilen (Altformat) |
+| `--dedupe-by-hash` / `--redownload` / `--refresh-meta` | Duplikate bzw. Neuladen erzwingen |
+| `--split-by-category` | Strukturen in Unterordner je Kategorie legen |
+
+Der Download ist **unterbrechbar und wiederaufsetzbar**: Ein abgebrochener Lauf wird
+mit demselben Befehl fortgesetzt, bereits vollständige Builds werden übersprungen
+(`builds_meta.jsonl`, Status `ok`). Fehlgeschlagene Builds bleiben mit `ok: false`
+in der Datei und werden beim nächsten Lauf erneut versucht.
+
+> **Rechtlicher Hinweis:** Die Seite untersagt in ihrer `robots.txt`
+> (`Content-Signal: ai-train=no`) die Nutzung der Inhalte als KI-Trainingsdaten,
+> und der Download-Endpoint liegt unter `Disallow: /api/`. Das Skript ist ein
+> lokales Werkzeug – die Verantwortung für Nutzung und Weitergabe der Daten
+> liegt beim Ausführenden.
+
 ## Abhängigkeiten
 
 Siehe `requirements.txt`:
@@ -115,6 +182,7 @@ Siehe `requirements.txt`:
 - numpy>=1.24.0
 - transformers>=4.30.0
 - pyglet>=2.0.0
+- requests>=2.28.0
 
 Installation aller Abhängigkeiten:
 ```powershell
