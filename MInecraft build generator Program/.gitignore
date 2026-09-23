@@ -7,4 +7,7 @@ test_outputs/
 generated.schem
 generated*.schem
 *.pt
-tests/
+exports/
+dist/
+# Generierte Projekte (Projektdaten bleiben per git add -f moeglich)
+projects/

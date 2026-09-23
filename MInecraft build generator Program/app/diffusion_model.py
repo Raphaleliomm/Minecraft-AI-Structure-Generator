@@ -11,12 +11,26 @@ import math
 import torch
 from torch import nn
 
+from app.grad_accum import apply_optimizer_step, per_voxel_weight
+
 
 def sinusoidal_embedding(timesteps: torch.Tensor, dim: int) -> torch.Tensor:
     half = dim // 2
     freqs = torch.exp(-math.log(10000.0) * torch.arange(half, device=timesteps.device, dtype=torch.float32) / half)
     args = timesteps[:, None].float() * freqs[None, :]
     return torch.cat([torch.sin(args), torch.cos(args)], dim=-1)
+
+
+def clamp_num_steps(num_steps: int | None, num_timesteps: int) -> int:
+    """Clamp sampling steps to the range the model was trained with.
+
+    The timestep is fed directly into the sinusoidal embedding, so values above
+    ``num_timesteps`` are outside the training distribution and produce garbage.
+    Fewer steps are allowed (coarser schedule).
+    """
+    if not num_steps:
+        return int(num_timesteps)
+    return max(1, min(int(num_steps), int(num_timesteps)))
 
 
 class BlockEmbedding(nn.Module):
@@ -115,8 +129,10 @@ class CrossAttention(nn.Module):
 
         if mask is not None:
             # mask: [B, S] -> [B, 1, 1, S]
-            attn_mask = mask[:, None, None, :].float()
-            attn = attn.masked_fill(attn_mask == 0, float('-inf'))
+            # A large negative value instead of -inf: a fully masked row would
+            # otherwise produce NaN in the softmax (and NaN poisons the whole run).
+            attn_mask = mask[:, None, None, :].to(torch.bool)
+            attn = attn.masked_fill(~attn_mask, -1e4)
 
         attn = torch.softmax(attn, dim=-1)
         attn = self.dropout(attn)
@@ -218,7 +234,17 @@ class VoxelDiffusionModel(nn.Module):
         self.out_norm = nn.GroupNorm(min(8, channels), channels)
         self.out_proj = nn.Conv3d(channels, num_blocks, 1)
 
-    def forward(self, noisy_blocks, timesteps, text_ids):
+    def features(self, noisy_blocks, timesteps, text_ids) -> torch.Tensor:
+        """UNet-Merkmale vor dem Ausgabekopf: ``[B, channels, GX, GY, GZ]``.
+
+        Der Ausgabekopf erzeugt daraus die Logits ``[B, num_blocks, X*Y*Z]`` -
+        mit grossem Blockvokabular und Grid der groesste Tensor im Training
+        (32^3 * 17.690 Bloecke * Batch 16 * 4 Byte = 34,5 GiB, mehr als der
+        gesamte VRAM einer 6-GB-Karte). Deshalb trennt dieses Modul die
+        Merkmale vom Kopf: ``iter_logit_chunks()`` kann den Kopf - und damit den
+        Speicherbedarf - in Voxel-Haeppchen rechnen, ohne die Numerik zu
+        aendern (1x1x1-Konvolution ist punktweise).
+        """
         x = self.block_embed(torch.clamp(noisy_blocks, 0, self.num_blocks - 1)).permute(0, 4, 1, 2, 3)
         t_emb = self.time_embed(sinusoidal_embedding(timesteps, self.d_model))
         x = x + self.text_to_ch(self.text_cond(text_ids))[:, :, None, None, None]
@@ -229,32 +255,40 @@ class VoxelDiffusionModel(nn.Module):
         x = self.middle(x, t_emb)
         for up in self.decoder:
             x = up(x, skips.pop(), t_emb)
-        return self.out_proj(self.out_norm(x))
+        return self.out_norm(x)
+
+    def forward(self, noisy_blocks, timesteps, text_ids):
+        return self.out_proj(self.features(noisy_blocks, timesteps, text_ids))
 
     @torch.no_grad()
-    def sample(self, text_ids, num_steps=None, temperature=1.0, top_k=0):
+    def sample(self, text_ids, num_steps=None, temperature=1.0, top_k=0,
+               chunk_voxels: int | None = None):
+        """Struktur erzeugen; ``chunk_voxels`` begrenzt die Logits im Speicher.
+
+        Ohne ``chunk_voxels`` wird wie bisher der ganze Logits-Tensor
+        ``[B, num_blocks, X*Y*Z]`` berechnet - bei Grid 32^3 und 17.690
+        Blockzustaenden sind das 2,16 GiB pro Kopie. ``chunk_voxels`` (siehe
+        ``app/training_memory.plan_generation``) rechnet Ausgabekopf und
+        Sampling in Voxel-Haeppchen; Logits und Wahrscheinlichkeiten bleiben
+        dabei identisch, nur die konkreten Zufallszahlen liegen anders.
+        """
         self.eval()
         device = next(self.parameters()).device
         B = text_ids.shape[0]
-        steps = num_steps or self.num_timesteps
+        steps = clamp_num_steps(num_steps, self.num_timesteps)
         GX, GY, GZ = self.grid_size
         x = torch.zeros((B, GX, GY, GZ), dtype=torch.long, device=device)
         for t in range(steps - 1, -1, -1):
-            logits = self.forward(x, torch.full((B,), t, device=device, dtype=torch.long), text_ids)
-            if temperature > 0 and temperature != 1.0:
-                logits = logits / temperature
-            if top_k > 0:
-                k = min(top_k, logits.shape[1])
-                min_k = torch.topk(logits, k, dim=1)[0][:, -1, :, :, :].unsqueeze(1)
-                logits[logits < min_k] = float("-inf")
-            probs = torch.softmax(logits, dim=1)
-            flat_probs = probs.permute(0, 2, 3, 4, 1).reshape(-1, self.num_blocks)
+            features = self.features(
+                x, torch.full((B,), t, device=device, dtype=torch.long), text_ids)
+            pred = sample_denoising_step(
+                self, features, temperature=temperature, top_k=top_k,
+                chunk_voxels=chunk_voxels).reshape(B, GX, GY, GZ)
             if t > 0:
-                pred = torch.multinomial(flat_probs, 1).reshape(B, GX, GY, GZ)
                 mask = torch.rand_like(pred.float()) < ((t - 1) / steps)
                 x = torch.where(mask, torch.zeros(pred.shape, dtype=torch.long, device=device), pred)
             else:
-                x = torch.multinomial(flat_probs, 1).reshape(B, GX, GY, GZ)
+                x = pred
             x = torch.clamp(x, 0, self.num_blocks - 1)
         return x
 
@@ -322,23 +356,25 @@ class TransformerDiffusionModel(nn.Module):
         self.out_norm = nn.GroupNorm(min(8, channels), channels)
         self.out_proj = nn.Conv3d(channels, num_blocks, 1)
 
-    def forward(
+    def features(
         self,
         noisy_blocks: torch.Tensor,
         timesteps: torch.Tensor,
         context: torch.Tensor,
         context_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Forward pass with cross-attention over transformer features.
+        """UNet-Merkmale vor dem Ausgabekopf: ``[B, channels, GX, GY, GZ]``.
+
+        Der Ausgabekopf erzeugt daraus die Logits ``[B, num_blocks, GX, GY, GZ]``.
+        Genau dieser Tensor war der Grund fuer "Cuda out of memory. Tried to
+        allocate 34.55 GiB" (Grid 32^3, 17.690 Blockzustaende, Batch 16);
+        ``iter_logit_chunks()`` rechnet den Kopf deshalb in Voxel-Haeppchen.
 
         Args:
             noisy_blocks: [B, GX, GY, GZ] block IDs (noisy)
             timesteps: [B] diffusion timesteps
             context: [B, S, D] transformer last hidden state
             context_mask: [B, S] attention mask (1=valid, 0=padded)
-
-        Returns:
-            logits: [B, num_blocks, GX, GY, GZ]
         """
         x = self.block_embed(torch.clamp(noisy_blocks, 0, self.num_blocks - 1)).permute(0, 4, 1, 2, 3)
         t_emb = self.time_embed(sinusoidal_embedding(timesteps, self.d_model))
@@ -353,7 +389,46 @@ class TransformerDiffusionModel(nn.Module):
         x = self.middle(x, t_emb, context_proj, context_mask)
         for up in self.decoder:
             x = up(x, skips.pop(), t_emb, context_proj, context_mask)
-        return self.out_proj(self.out_norm(x))
+        return self.out_norm(x)
+
+    def forward(
+        self,
+        noisy_blocks: torch.Tensor,
+        timesteps: torch.Tensor,
+        context: torch.Tensor,
+        context_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Logits ``[B, num_blocks, GX, GY, GZ]`` (ungechunkt).
+
+        Fuer das Training immer ``features()`` + ``iter_logit_chunks()``
+        benutzen - der ungechunkte Tensor sprengt bei Grid >= 32 und grossem
+        Blockvokabular jeden VRAM.
+        """
+        return self.out_proj(self.features(noisy_blocks, timesteps, context, context_mask))
+
+        t_emb = self.time_embed(sinusoidal_embedding(timesteps, self.d_model))
+
+        # Project context if needed
+        context_proj = self.context_proj(context)
+
+        skips = []
+        for down in self.encoder:
+            x, skip = down(x, t_emb, context_proj, context_mask)
+            skips.append(skip)
+        x = self.middle(x, t_emb, context_proj, context_mask)
+        for up in self.decoder:
+            x = up(x, skips.pop(), t_emb, context_proj, context_mask)
+        return self.out_norm(x)
+
+    def forward(
+        self,
+        noisy_blocks: torch.Tensor,
+        timesteps: torch.Tensor,
+        context: torch.Tensor,
+        context_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Logits ``[B, num_blocks, GX, GY, GZ]`` (ungechunkt)."""
+        return self.out_proj(self.features(noisy_blocks, timesteps, context, context_mask))
 
     @torch.no_grad()
     def sample(
@@ -363,15 +438,22 @@ class TransformerDiffusionModel(nn.Module):
         num_steps: int | None = None,
         temperature: float = 1.0,
         top_k: int = 0,
+        chunk_voxels: int | None = None,
     ) -> torch.Tensor:
         """Sample from the diffusion model.
 
         Args:
             context: [B, S, D] transformer last hidden state
             context_mask: [B, S] attention mask
-            num_steps: number of denoising steps (default: self.num_timesteps)
+            num_steps: number of denoising steps (clamped to self.num_timesteps)
             temperature: sampling temperature
             top_k: top-k filtering (0 = disabled)
+            chunk_voxels: voxel chunk for the output head. ``None`` builds the
+                full logits tensor ``[B, num_blocks, X*Y*Z]`` (2.16 GiB per copy
+                at grid 32^3 with 17,690 block states, which is what made
+                "Generate" die with "Cuda out of memory" after training).
+                ``app.training_memory.plan_generation()`` provides a value that
+                fits the free VRAM.
 
         Returns:
             [B, GX, GY, GZ] block ID grid
@@ -379,31 +461,26 @@ class TransformerDiffusionModel(nn.Module):
         self.eval()
         device = next(self.parameters()).device
         B = context.shape[0]
-        steps = num_steps or self.num_timesteps
+        steps = clamp_num_steps(num_steps, self.num_timesteps)
         GX, GY, GZ = self.grid_size
         x = torch.zeros((B, GX, GY, GZ), dtype=torch.long, device=device)
 
         for t in range(steps - 1, -1, -1):
-            logits = self.forward(
+            features = self.features(
                 x,
                 torch.full((B,), t, device=device, dtype=torch.long),
                 context,
                 context_mask,
             )
-            if temperature > 0 and temperature != 1.0:
-                logits = logits / temperature
-            if top_k > 0:
-                k = min(top_k, logits.shape[1])
-                min_k = torch.topk(logits, k, dim=1)[0][:, -1, :, :, :].unsqueeze(1)
-                logits[logits < min_k] = float("-inf")
-            probs = torch.softmax(logits, dim=1)
-            flat_probs = probs.permute(0, 2, 3, 4, 1).reshape(-1, self.num_blocks)
+            pred = sample_denoising_step(
+                self, features, temperature=temperature, top_k=top_k,
+                chunk_voxels=chunk_voxels).reshape(B, GX, GY, GZ)
             if t > 0:
-                pred = torch.multinomial(flat_probs, 1).reshape(B, GX, GY, GZ)
-                mask = torch.rand_like(pred.float()) < ((t - 1) / steps)
+                # Match the training noise process (rand < t / num_timesteps).
+                mask = torch.rand_like(pred.float()) < ((t - 1) / self.num_timesteps)
                 x = torch.where(mask, torch.zeros(pred.shape, dtype=torch.long, device=device), pred)
             else:
-                x = torch.multinomial(flat_probs, 1).reshape(B, GX, GY, GZ)
+                x = pred
             x = torch.clamp(x, 0, self.num_blocks - 1)
         return x
 
@@ -461,7 +538,176 @@ def create_noisy_blocks(
     return noisy
 
 
-def train_diffusion_step(model, batch, optimizer, device, scaler=None, noise_block_prob=0.20):
+def logit_chunk_plan(features: torch.Tensor,
+                     chunk_voxels: int | None = None) -> Tuple[int, int]:
+    """(Voxel insgesamt, Voxel pro Chunk) fuer eine Merkmalskarte."""
+    voxels = 1
+    for size in features.shape[2:]:
+        voxels *= int(size)
+    if not chunk_voxels:
+        return voxels, voxels
+    return voxels, max(1, min(voxels, int(chunk_voxels)))
+
+
+def iter_logit_chunks(model: nn.Module, features: torch.Tensor,
+                      chunk_voxels: int | None = None):
+    """Logits stueckweise erzeugen: ``(start, end, logits_chunk)``.
+
+    ``features`` ist der Ausgang von ``model.features()`` (Form
+    ``[B, channels, GX, GY, GZ]``); der Ausgabekopf ist eine 1x1x1-Konvolution
+    und damit punktweise, laesst sich also beliebig entlang der (flach
+    gedachten) Voxel-Achse aufteilen. Bei ``chunk_voxels=None`` wird genau ein
+    Chunk erzeugt - identisch zum ungechunkten ``forward()``.
+    """
+    batch = int(features.shape[0])
+    channels = int(features.shape[1])
+    voxels, step = logit_chunk_plan(features, chunk_voxels)
+    flat = features.reshape(batch, channels, voxels)
+    for start in range(0, voxels, step):
+        end = min(start + step, voxels)
+        window = flat[:, :, start:end].reshape(batch, channels, 1, 1, end - start)
+        yield start, end, model.out_proj(window)[:, :, 0, 0, :]
+
+
+def sample_denoising_step(model: nn.Module, features: torch.Tensor, *,
+                          temperature: float = 1.0, top_k: int = 0,
+                          chunk_voxels: int | None = None) -> torch.Tensor:
+    """Block-IDs eines Denoising-Schritts aus den UNet-Merkmalen ziehen.
+
+    ``features`` kommt aus ``model.features()`` (Form ``[B, channels, GX, GY, GZ]``),
+    zurueck kommen die Vorhersagen ``[B, GX*GY*GZ]``. Temperatur, Top-K und
+    Softmax laufen je Voxel-Chunk; die Voxel werden weiterhin in der Reihenfolge
+    0..N-1 abgearbeitet. Die Logits und damit die Wahrscheinlichkeiten sind
+    exakt dieselben wie ungechunkt (mit ``top_k=1`` ist das Sampling
+    deterministisch und das Ergebnis deshalb bitgleich), nur die konkreten
+    Zufallszahlen liegen an einer anderen Stelle des Zufallsgenerators -
+    Chunking ist also statistisch gleichwertig, aber nicht bitgleich.
+
+    Warum ueberhaupt: ungechunkt kostet ein Schritt bei Grid 32^3 und 17.690
+    Blockzustaenden ``17690 * 32768 * 4 Byte = 2,16 GiB`` - und wegen der
+    Temperatur-, Top-K- und Softmax-Kopien liegt zeitweise das Vierfache im
+    Speicher. Auf einer 6-GB-Karte endete das nach einem Trainingslauf in
+    "Cuda out of memory" (dieselbe Ursache wie beim Training, nur ohne
+    Rueckwaerts-Pass).
+    """
+    batch = int(features.shape[0])
+    voxels = 1
+    for size in features.shape[2:]:
+        voxels *= int(size)
+    predictions = torch.empty((batch, voxels), dtype=torch.long,
+                              device=features.device)
+    for start, end, chunk_logits in iter_logit_chunks(model, features, chunk_voxels):
+        blocks = int(chunk_logits.shape[1])
+        logits = chunk_logits
+        if temperature > 0 and temperature != 1.0:
+            logits = logits / temperature
+        if int(top_k) > 0:
+            k = min(int(top_k), blocks)
+            min_k = torch.topk(logits, k, dim=1)[0][:, -1, :].unsqueeze(1)
+            logits[logits < min_k] = float("-inf")
+        probs = torch.softmax(logits, dim=1)                   # [B, Bloecke, Chunk]
+        flat = probs.permute(0, 2, 1).reshape(-1, blocks)      # [B*Chunk, Bloecke]
+        predictions[:, start:end] = torch.multinomial(flat, 1).reshape(batch, end - start)
+    return predictions
+
+
+
+def chunked_weighted_ce_loss(
+    model: nn.Module,
+    features: torch.Tensor,
+    clean: torch.Tensor,
+    batch: dict,
+    *,
+    device: torch.device,
+    chunk_voxels: int | None = None,
+    scaler=None,
+    grad_scale: float = 1.0,
+) -> float:
+    """Gewichtete Kreuzentropie chunkweise vorwaerts UND rueckwaerts rechnen.
+
+    ``grad_scale`` skaliert nur die *Gradienten* (der zurueckgegebene Loss bleibt
+    der echte Mittelwert). Die Gradient-Akkumulation teilt damit den Anteil eines
+    Mikro-Batches am Gesamt-Batch zu (siehe ``app/grad_accum.py``), ohne dass die
+    angezeigte Verlustkurve verfaelscht wird.
+
+    Rueckgabe ist der Gesamt-Loss ``Summe(ce * w) / Summe(w)`` - identisch zur
+    ungechunkten Rechnung, genau wie die Gradienten (nur die Reihenfolge der
+    Summation weicht ab).
+
+    Zwei Stufen, damit die Rechenzeit nicht explodiert:
+      1. Der Ausgabekopf laeuft in Voxel-Chunks auf ``features.detach()`` und
+         sammelt nur den Gradienten bezueglich der Merkmale. Jeder Chunk wird
+         sofort rueckwaerts gerechnet und danach freigegeben - deshalb liegt
+         immer nur ein Chunk gleichzeitig im Speicher.
+      2. EIN ``autograd.backward`` durch den UNet-Rumpf mit dem gesammelten
+         Gradienten als Startwert.
+
+    Wuerde man stattdessen pro Chunk ``loss.backward()`` aufrufen, muesste der
+    (teure) Backward des Rumpfes fuer jeden Chunk erneut durchlaufen - bei 128
+    Chunks ein Vielfaches der Rechenzeit (gemessen: 54 s statt ~3 s pro Batch).
+
+    Der Aufrufer setzt ``model.train()``, ruft ``optimizer.zero_grad()`` vorher
+    und danach ``clip_grad_norm_`` / ``optimizer.step()``. Mit AMP wird jeder
+    Chunk-Loss skaliert und die Gradienten hinterher einmal entpackt
+    (``scaler.unscale_``).
+
+    Warum ueberhaupt: die Logits sind ``[B, num_blocks, X*Y*Z]``; bei Grid 32^3,
+    17.690 Blockzustaenden und Batch 16 sind das 34,55 GiB - die Karte meldet
+    dann "Tried to allocate 34.55 GiB" und das Training bricht ab. Mit Chunks
+    liegt nur ein Haeppchen davon gleichzeitig im Speicher.
+    """
+    use_amp = scaler is not None
+    batch_size = int(clean.shape[0])
+    flat_clean = clean.reshape(batch_size, -1)
+
+    # Gewichte siehe app/grad_accum.per_voxel_weight: dieselbe Definition nutzt
+    # die Gradient-Akkumulation fuer die Anteile der Mikro-Batches.
+    weight = per_voxel_weight(flat_clean, batch, batch_size)
+    # Das Gewicht haengt nicht vom Modellausgang ab -> Nenner einmal bestimmen,
+    # damit jeder Chunk korrekt skaliert werden kann.
+    denominator = weight.sum().clamp_min(1.0)
+
+    # Stufe 1: Kopf in Chunks, Gradient nur bezueglich der Merkmale.
+    detached = features.detach().requires_grad_(True)
+    total_loss = 0.0
+    for start, end, logits in iter_logit_chunks(model, detached, chunk_voxels):
+        with torch.amp.autocast(device.type if use_amp else "cpu", enabled=use_amp):
+            ce = torch.nn.functional.cross_entropy(
+                logits, flat_clean[:, start:end], reduction="none")
+            chunk_loss = (ce * weight[:, start:end]).sum() / denominator
+        total_loss += float(chunk_loss.detach())
+        if grad_scale != 1.0:
+            # Nur der Gradient wird skaliert (Anteil am Gesamt-Batch), nicht die
+            # angezeigte Verlustkurve.
+            chunk_loss = chunk_loss * float(grad_scale)
+        if use_amp:
+            scaler.scale(chunk_loss).backward()
+        else:
+            chunk_loss.backward()
+
+    # Stufe 2: ein einziger Backward durch den Rumpf.
+    seed = detached.grad
+    if seed is None:
+        raise RuntimeError(
+            "Keine Chunk-Gradienten berechnet - features/out_proj ohne grad_fn?")
+    if features.requires_grad:
+        torch.autograd.backward(features, grad_tensors=seed)
+    return total_loss
+
+
+def train_diffusion_step(model, batch, optimizer, device, scaler=None, noise_block_prob=0.20,
+                         chunk_voxels=None, accumulate=False, grad_scale=1.0):
+    """Ein Trainingsschritt fuer das VoxelDiffusionModel.
+
+    ``chunk_voxels`` begrenzt die Voxel, die gleichzeitig in Logits umgerechnet
+    werden (siehe ``chunked_weighted_ce_loss``). ``None`` = alles auf einmal
+    (altes Verhalten, nur fuer kleine Vokabulare/Grids geeignet).
+
+    ``accumulate=True`` laesst den Optimizer-Schritt aus (Gradient-Akkumulation):
+    der Aufrufer setzt ``zero_grad`` vorher und ruft nach dem letzten Mikro-Batch
+    ``app.grad_accum.apply_optimizer_step()``. ``grad_scale`` ist der Anteil des
+    Mikro-Batches am Gesamt-Batch.
+    """
     model.train()
     clean = torch.clamp(batch["voxel_ids"].to(device, non_blocking=True).long(), 0, model.num_blocks - 1)
     text_ids = batch["prompt_ids"].to(device, non_blocking=True)
@@ -469,36 +715,17 @@ def train_diffusion_step(model, batch, optimizer, device, scaler=None, noise_blo
     t = torch.randint(0, model.num_timesteps, (B,), device=device)
     noisy = create_noisy_blocks(clean, t, model.num_timesteps, model.num_blocks, noise_block_prob)
     use_amp = scaler is not None
+    if not accumulate:
+        optimizer.zero_grad(set_to_none=True)
     with torch.amp.autocast(device.type if use_amp else "cpu", enabled=use_amp):
-        logits = model(noisy, t, text_ids)
-        ce = torch.nn.functional.cross_entropy(logits, clean, reduction="none").reshape(-1)
-        sample_weight = batch.get("sample_weight", torch.ones(B, device=device, dtype=torch.float32))
-        if isinstance(sample_weight, torch.Tensor) and sample_weight.device != device:
-            sample_weight = sample_weight.to(device)
-        sample_weight_expanded = sample_weight.view(B, 1, 1, 1).expand_as(clean).reshape(-1)
-        per_block_weight = batch.get("per_block_weight", torch.ones(B, device=device, dtype=torch.float32))
-        per_air_weight = batch.get("per_air_weight", torch.ones(B, device=device, dtype=torch.float32))
-        if isinstance(per_block_weight, torch.Tensor) and per_block_weight.device != device:
-            per_block_weight = per_block_weight.to(device)
-        if isinstance(per_air_weight, torch.Tensor) and per_air_weight.device != device:
-            per_air_weight = per_air_weight.to(device)
-        per_block_w = per_block_weight.view(B, 1, 1, 1).expand_as(clean).reshape(-1)
-        per_air_w = per_air_weight.view(B, 1, 1, 1).expand_as(clean).reshape(-1)
-        w = torch.where(clean.reshape(-1) == 0, per_air_w, per_block_w) * sample_weight_expanded
-        loss = (ce * w).sum() / w.sum().clamp_min(1.0)
-    optimizer.zero_grad(set_to_none=True)
-    if use_amp:
-        scaler.scale(loss).backward()
-        scaler.unscale_(optimizer)
-    else:
-        loss.backward()
-    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-    if use_amp:
-        scaler.step(optimizer)
-        scaler.update()
-    else:
-        optimizer.step()
-    return float(loss.detach())
+        features = model.features(noisy, t, text_ids)
+    loss = chunked_weighted_ce_loss(model, features, clean, batch, device=device,
+                                    chunk_voxels=chunk_voxels, scaler=scaler,
+                                    grad_scale=grad_scale)
+    if accumulate:
+        return float(loss)
+    apply_optimizer_step(model, optimizer, scaler)
+    return float(loss)
 
 
 def train_transformer_diffusion_step(
@@ -509,10 +736,19 @@ def train_transformer_diffusion_step(
     device: torch.device,
     scaler=None,
     noise_block_prob: float = 0.20,
+    chunk_voxels: int | None = None,
+    accumulate: bool = False,
+    grad_scale: float = 1.0,
 ) -> float:
     """Training step for TransformerDiffusionModel.
 
     The transformer_encoder is frozen - only the UNet parameters are trained.
+    ``chunk_voxels`` begrenzt die Logits pro Rechenschritt (siehe
+    ``chunked_weighted_ce_loss``); ``None`` = ungechunkt.
+
+    ``accumulate``/``grad_scale`` gehoeren zur Gradient-Akkumulation (siehe
+    ``app/grad_accum.py``): mit ``accumulate=True`` wird nur rueckwaerts
+    gerechnet, ``clip``/``step`` macht der Aufrufer am Ende des Fensters.
     """
     model.train()
     clean = torch.clamp(batch["voxel_ids"].to(device, non_blocking=True).long(), 0, model.num_blocks - 1)
@@ -531,36 +767,16 @@ def train_transformer_diffusion_step(
         context_mask = encoded["attention_mask"].to(device)
 
     use_amp = scaler is not None
+    if not accumulate:
+        optimizer.zero_grad(set_to_none=True)
     with torch.amp.autocast(device.type if use_amp else "cpu", enabled=use_amp):
-        logits = model(noisy, t, context, context_mask)
-        ce = torch.nn.functional.cross_entropy(logits, clean, reduction="none").reshape(-1)
-        sample_weight = batch.get("sample_weight", torch.ones(B, device=device, dtype=torch.float32))
-        if isinstance(sample_weight, torch.Tensor) and sample_weight.device != device:
-            sample_weight = sample_weight.to(device)
-        sample_weight_expanded = sample_weight.view(B, 1, 1, 1).expand_as(clean).reshape(-1)
-        per_block_weight = batch.get("per_block_weight", torch.ones(B, device=device, dtype=torch.float32))
-        per_air_weight = batch.get("per_air_weight", torch.ones(B, device=device, dtype=torch.float32))
-        if isinstance(per_block_weight, torch.Tensor) and per_block_weight.device != device:
-            per_block_weight = per_block_weight.to(device)
-        if isinstance(per_air_weight, torch.Tensor) and per_air_weight.device != device:
-            per_air_weight = per_air_weight.to(device)
-        per_block_w = per_block_weight.view(B, 1, 1, 1).expand_as(clean).reshape(-1)
-        per_air_w = per_air_weight.view(B, 1, 1, 1).expand_as(clean).reshape(-1)
-        w = torch.where(clean.reshape(-1) == 0, per_air_w, per_block_w) * sample_weight_expanded
-        loss = (ce * w).sum() / w.sum().clamp_min(1.0)
-
-    optimizer.zero_grad(set_to_none=True)
-    if use_amp:
-        scaler.scale(loss).backward()
-        scaler.unscale_(optimizer)
-    else:
-        loss.backward()
-    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-    if use_amp:
-        scaler.step(optimizer)
-        scaler.update()
-    else:
-        optimizer.step()
+        features = model.features(noisy, t, context, context_mask)
+    loss = chunked_weighted_ce_loss(model, features, clean, batch, device=device,
+                                    chunk_voxels=chunk_voxels, scaler=scaler,
+                                    grad_scale=grad_scale)
+    if accumulate:
+        return float(loss.detach())
+    apply_optimizer_step(model, optimizer, scaler)
     return float(loss.detach())
 
 
@@ -571,11 +787,20 @@ def train_transformer_diffusion_step_cached(
     device: torch.device,
     scaler=None,
     noise_block_prob: float = 0.20,
+    chunk_voxels: int | None = None,
+    accumulate: bool = False,
+    grad_scale: float = 1.0,
 ) -> float:
     """Training step for TransformerDiffusionModel using pre-computed hidden states.
     
     No transformer_encoder needed - context comes from the batch directly.
     The cached states are float32 on CPU, so we cast them to match the model's dtype.
+    ``chunk_voxels`` begrenzt die Logits pro Rechenschritt (siehe
+    ``chunked_weighted_ce_loss``); ``None`` = ungechunkt.
+
+    ``accumulate``/``grad_scale`` gehoeren zur Gradient-Akkumulation (siehe
+    ``app/grad_accum.py``): mit ``accumulate=True`` wird nur rueckwaerts
+    gerechnet, ``clip``/``step`` macht der Aufrufer am Ende des Fensters.
     """
     model.train()
     clean = torch.clamp(batch["voxel_ids"].to(device, non_blocking=True).long(), 0, model.num_blocks - 1)
@@ -590,34 +815,14 @@ def train_transformer_diffusion_step_cached(
     context_mask = batch["attention_masks"].to(device=device, non_blocking=True)
 
     use_amp = scaler is not None
+    if not accumulate:
+        optimizer.zero_grad(set_to_none=True)
     with torch.amp.autocast(device.type if use_amp else "cpu", enabled=use_amp):
-        logits = model(noisy, t, context, context_mask)
-        ce = torch.nn.functional.cross_entropy(logits, clean, reduction="none").reshape(-1)
-        sample_weight = batch.get("sample_weight", torch.ones(B, device=device, dtype=torch.float32))
-        if isinstance(sample_weight, torch.Tensor) and sample_weight.device != device:
-            sample_weight = sample_weight.to(device)
-        sample_weight_expanded = sample_weight.view(B, 1, 1, 1).expand_as(clean).reshape(-1)
-        per_block_weight = batch.get("per_block_weight", torch.ones(B, device=device, dtype=torch.float32))
-        per_air_weight = batch.get("per_air_weight", torch.ones(B, device=device, dtype=torch.float32))
-        if isinstance(per_block_weight, torch.Tensor) and per_block_weight.device != device:
-            per_block_weight = per_block_weight.to(device)
-        if isinstance(per_air_weight, torch.Tensor) and per_air_weight.device != device:
-            per_air_weight = per_air_weight.to(device)
-        per_block_w = per_block_weight.view(B, 1, 1, 1).expand_as(clean).reshape(-1)
-        per_air_w = per_air_weight.view(B, 1, 1, 1).expand_as(clean).reshape(-1)
-        w = torch.where(clean.reshape(-1) == 0, per_air_w, per_block_w) * sample_weight_expanded
-        loss = (ce * w).sum() / w.sum().clamp_min(1.0)
-
-    optimizer.zero_grad(set_to_none=True)
-    if use_amp:
-        scaler.scale(loss).backward()
-        scaler.unscale_(optimizer)
-    else:
-        loss.backward()
-    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-    if use_amp:
-        scaler.step(optimizer)
-        scaler.update()
-    else:
-        optimizer.step()
-    return float(loss.detach())
+        features = model.features(noisy, t, context, context_mask)
+    loss = chunked_weighted_ce_loss(model, features, clean, batch, device=device,
+                                    chunk_voxels=chunk_voxels, scaler=scaler,
+                                    grad_scale=grad_scale)
+    if accumulate:
+        return float(loss)
+    apply_optimizer_step(model, optimizer, scaler)
+    return float(loss)

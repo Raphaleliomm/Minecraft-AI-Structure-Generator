@@ -9,14 +9,18 @@ Ausgabe-Layout (direkt als --data-dir für dataset.py / train.py nutzbar):
 
     <out-dir>/
         builds_meta.jsonl      eine JSON-Zeile pro Build (alle Metadaten, Resume-Daten)
-        prompts.json           {"<datei>.schem": "<prompt>", ...}
+        prompts.json           {"<datei>.schem": ["<name>", "<prompt>"], ...}
         <slug>__Name.schem     Struktur (konvertiert, von dataset.py gelesen)
         <slug>__Name.litematic Original-Format (optional, via --formats)
         <slug>__Name.txt       Prompt-Sidecar (von dataset.discover_examples gelesen)
 
-Die .txt-Sidecars enthalten optional Herkunftszeilen (name:/author:/source:/url:).
-Der Dataset-Parser filtert genau diese Präfixe heraus (dataset.META_PREFIXES),
-mit --no-meta-lines entsteht exakt das alte Format (nur Prompt-Zeilen).
+Die .txt-Sidecars enthalten einen Prompt pro Block, getrennt durch '---':
+erster Block = Name des Builds, danach die Beschreibung. Daraus entsteht pro
+Struktur ein Trainingsbeispiel für den Namen und eines für die Beschreibung
+(mit --no-name-prompt nur die Beschreibung). Herkunftsangaben (Autor, URL,
+Quelle) stehen in builds_meta.jsonl; das alte Format mit
+name:/author:/source:/url:-Zeilen liest dataset.split_prompt_text() weiterhin
+und --rebuild-sidecars schreibt vorhandene Sidecars offline auf das neue um.
 
 WICHTIG - RECHTLICHER HINWEIS
     market.phantom-node.com setzt in der robots.txt "Content-Signal: ai-train=no"
@@ -31,6 +35,7 @@ Beispiele:
     python scrape_phantommarket.py --metadata-only --max-builds 50
     python scrape_phantommarket.py --formats litematic,schem --max-file-mb 100
     python scrape_phantommarket.py --rebuild-prompts      # prompts.json neu ableiten
+    python scrape_phantommarket.py --rebuild-sidecars     # .txt auf neues Format
 """
 from __future__ import annotations
 
@@ -72,6 +77,14 @@ GZIP_SUFFIXES = frozenset({".schem", ".schematic", ".litematic", ".nbt"})
 ZIP_SUFFIXES = frozenset({".zip", ".mcpack"})
 # Formate, die dataset.discover_examples() einsammelt
 DATASET_SUFFIXES = frozenset({".schem", ".schematic"})
+
+# Prompt-Sidecar-Format: ein Prompt je Block, getrennt durch '---' (dataset.py
+# liest genau dieses Format in split_prompt_text()).
+PROMPT_SEPARATOR = "---"
+# Herkunftszeilen des Altformats - Metadaten, kein Prompt.
+META_LINE_PATTERN = re.compile(r"(?i)^(name|author|source|url|aug|id):")
+# '---' innerhalb eines Namens/Beschreibung wuerde als Prompt-Trenner gelten.
+DASH_RUN_PATTERN = re.compile(r"-{3,}")
 
 ILLEGAL_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 LOC_PATTERN = re.compile(r"<loc>\s*([^<\s]+)\s*</loc>")
@@ -565,27 +578,120 @@ META_FILENAME = "builds_meta.jsonl"
 PROMPTS_FILENAME = "prompts.json"
 
 
-def write_prompt_sidecar(
-    path: Path, prompt: str, record: dict[str, Any], with_meta_lines: bool
-) -> None:
-    """Schreibt <struktur>.txt mit dem Prompt (Format von dataset.discover_examples).
+def clean_sidecar_name(name: str) -> str:
+    """Bereinigt einen Namen für den ersten Prompt-Block.
 
-    Die Praefixe name:/author:/source:/url: filtert der Dataset-Parser als
-    Metadaten heraus (dataset.META_PREFIXES), der Rest gilt als Prompt.
+    Ein '---' im Namen (kommt in Seitentiteln vor) wird zu einem Leerzeichen:
+    sonst würde der Name beim erneuten Lesen des Sidecars als Prompt-Trenner
+    gelten und in zwei Prompts zerfallen.
     """
-    if not prompt:
+    return re.sub(r"\s+", " ", DASH_RUN_PATTERN.sub(" ", str(name))).strip()
+
+
+def sidecar_prompts(
+    record: dict[str, Any], *, with_name_prompt: bool = True
+) -> list[str]:
+    """Prompt-Blöcke eines Sidecars: erst der Name des Builds, dann der Prompt.
+
+    Mit ``with_name_prompt=False`` (--no-name-prompt) steht nur der Build-Prompt
+    im Sidecar. Nur wenn der Prompt exakt der Name ist (Build ohne Beschreibung
+    oder --prompt-mode title), entsteht ein einzelner Block statt einer Dublette.
+    """
+    title = clean_sidecar_name(record.get("title") or "")
+    prompt = str(record.get("prompt") or "").strip()
+    prompts: list[str] = []
+    if with_name_prompt and title and title != prompt:
+        prompts.append(title)
+    if prompt and prompt not in prompts:
+        prompts.append(prompt)
+    return prompts
+
+
+def write_prompt_sidecar(path: Path, prompts: Iterable[str]) -> None:
+    """Schreibt <struktur>.txt: ein Prompt je Block, getrennt durch '---'.
+
+    dataset.split_prompt_text() erzeugt daraus ein Trainingsbeispiel pro Block
+    (erster Block = Name, zweiter Block = Beschreibung). Herkunftszeilen wie im
+    Altformat schreibt der Scraper nicht mehr - Autor/URL stehen in
+    builds_meta.jsonl.
+    """
+    blocks = [text for text in (str(prompt).strip() for prompt in prompts) if text]
+    if not blocks:
         return
-    lines: list[str] = []
-    if with_meta_lines:
-        if record.get("title"):
-            lines.append(f"name: {record['title']}")
-        if record.get("author"):
-            lines.append(f"author: {record['author']}")
-        lines.append("source: phantommarket")
-        lines.append(f"url: {record['url']}")
-        lines.append("---")
-    lines.append(prompt)
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    path.write_text(f"\n{PROMPT_SEPARATOR}\n".join(blocks) + "\n", encoding="utf-8")
+
+
+def sidecar_prompt_blocks(text: str) -> list[str]:
+    """Prompts eines .txt-Sidecars (neues und altes Format) als Liste.
+
+    Neues Format  "X\\n---\\n<Beschreibung>"                 -> ["X", "<Beschreibung>"]
+    Altformat     "name: X\\nauthor: ...\\n---\\n<Beschreibung>" -> ["X", "<Beschreibung>"]
+
+    Der Name steht immer zuerst; Herkunftszeilen des Altformats entfallen (sie
+    stehen in builds_meta.jsonl). Mehrfach vorkommende Blöcke werden entdoppelt.
+    """
+    name = ""
+    for line in str(text).splitlines():
+        match = META_LINE_PATTERN.match(line.strip())
+        if match and match.group(1).lower() == "name":
+            name = clean_sidecar_name(line.split(":", 1)[1])
+            break
+
+    prompts: list[str] = [name] if name else []
+    for chunk in str(text).split(PROMPT_SEPARATOR):
+        lines = [
+            line.strip()
+            for line in chunk.splitlines()
+            if line.strip() and not META_LINE_PATTERN.match(line.strip())
+        ]
+        block = "\n".join(lines)
+        if block and block not in prompts:
+            prompts.append(block)
+    return prompts
+
+
+def is_prompt_sidecar(path: Path) -> bool:
+    """.txt aus dem Scraper-Layout: Struktur daneben oder Altformat-Kopf.
+
+    Fremde Textdateien im Datenordner (Notizen o.ä.) bleiben damit unangetastet.
+    """
+    if any((path.with_suffix(suffix)).exists() for suffix in DATASET_SUFFIXES):
+        return True
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            first_line = handle.readline()
+    except OSError:
+        return False
+    return bool(META_LINE_PATTERN.match(first_line.strip()))
+
+
+def rewrite_sidecars(out_dir: Path) -> tuple[int, int]:
+    """Migriert vorhandene .txt-Sidecars offline auf das neue Format.
+
+    Returns (geänderte Sidecars, bereits aktuelle Sidecars).
+    """
+    changed = 0
+    unchanged = 0
+    for path in sorted(out_dir.rglob("*.txt")):
+        if not is_prompt_sidecar(path):
+            continue
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        prompts = sidecar_prompt_blocks(raw)
+        if not prompts:
+            continue
+        new_text = f"\n{PROMPT_SEPARATOR}\n".join(prompts) + "\n"
+        if new_text == raw:
+            unchanged += 1
+            continue
+        try:
+            path.write_text(new_text, encoding="utf-8")
+        except OSError:
+            continue
+        changed += 1
+    return changed, unchanged
 
 
 def load_meta(out_dir: Path) -> dict[str, dict[str, Any]]:
@@ -616,15 +722,15 @@ def append_meta(out_dir: Path, record: dict[str, Any]) -> None:
         handle.flush()
 
 
-def collect_prompt_map(records: Iterable[dict[str, Any]]) -> dict[str, str]:
-    """Baut {dateiname: prompt} aus allen Datensätzen (nur dataset-Formate)."""
-    prompt_map: dict[str, str] = {}
+def collect_prompt_map(records: Iterable[dict[str, Any]]) -> dict[str, list[str]]:
+    """Baut {dateiname: [Name, Prompt]} aus allen Datensätzen (nur dataset-Formate)."""
+    prompt_map: dict[str, list[str]] = {}
     for record in records:
-        prompt = record.get("prompt")
-        if not prompt:
+        prompts = sidecar_prompts(record)
+        if not prompts:
             continue
         for name in record.get("prompt_files") or []:
-            prompt_map[name] = prompt
+            prompt_map[name] = prompts
     return prompt_map
 
 
@@ -642,7 +748,12 @@ def write_prompts_json(out_dir: Path, records: Iterable[dict[str, Any]]) -> int:
 def record_is_complete(
     record: dict[str, Any], out_dir: Path, *, metadata_only: bool
 ) -> bool:
-    """Prüft, ob ein Build bereits vollständig geholt wurde (Resume-Entscheidung)."""
+    """Prüft, ob ein Build bereits vollständig geholt wurde (Resume-Entscheidung).
+
+    Als "erledigt" gelten auch Builds, die bewusst übersprungen wurden
+    (zu groß, Duplikat, nicht konvertierbares Format). Sonst würde jeder
+    Resume-Lauf diese Builds erneut anfragen.
+    """
     if not record.get("ok"):
         return False
     if metadata_only or not record.get("files"):
@@ -650,13 +761,16 @@ def record_is_complete(
     downloads = record.get("downloads") or []
     if not downloads:
         return False
+    terminal_without_file = {"skipped_too_large", "duplicate"}
     for entry in downloads:
-        if entry.get("status") not in ("downloaded", "existing"):
+        status = entry.get("status")
+        if status in terminal_without_file:
+            continue
+        if status not in ("downloaded", "existing"):
             return False
         relative = entry.get("path")
-        if entry.get("status") in ("downloaded", "existing"):
-            if not relative or not (out_dir / relative).exists():
-                return False
+        if not relative or not (out_dir / relative).exists():
+            return False
     return True
 
 
@@ -749,7 +863,7 @@ def scrape_build(
     for sidecar_name in sorted(sidecar_names):
         sidecar_path = target_dir / sidecar_name
         write_prompt_sidecar(
-            sidecar_path, record.get("prompt", ""), record, args.meta_lines
+            sidecar_path, sidecar_prompts(record, with_name_prompt=args.name_prompt)
         )
         sidecar_paths.append(str(sidecar_path.relative_to(out_dir)).replace("\\", "/"))
 
@@ -804,10 +918,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--dedupe-by-hash", action="store_true", help="Dateien mit bereits geladenem Server-Hash ueberspringen")
     parser.add_argument("--split-by-category", action="store_true", help="Dateien in Unterordner je Kategorie legen")
     parser.add_argument(
-        "--meta-lines",
+        "--name-prompt",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="name:/author:/source:/url:-Zeilen in die .txt-Sidecars schreiben (--no-meta-lines = Altformat)",
+        help="Name des Builds als eigenen (ersten) Prompt-Block in die .txt schreiben",
+    )
+    parser.add_argument(
+        "--rebuild-sidecars",
+        action="store_true",
+        help="vorhandene .txt-Sidecars offline auf das neue Format (Name + '---' + Beschreibung) umschreiben und beenden",
     )
     parser.add_argument("--rebuild-prompts", action="store_true", help="prompts.json neu aus builds_meta.jsonl ableiten und beenden")
     return parser.parse_args(argv)
@@ -843,10 +962,17 @@ def main(argv: list[str] | None = None) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     out_dir = out_dir.resolve()
 
+    if args.rebuild_sidecars:
+        changed, unchanged = rewrite_sidecars(out_dir)
+        print(f"Sidecars umgeschrieben: {changed} geaendert, {unchanged} bereits aktuell")
+        print(f"Datei: {out_dir}  (Format: <Name> / '---' / <Beschreibung>)")
+        print("Hinweis: prompts.json mit --rebuild-prompts aus builds_meta.jsonl neu ableiten.")
+        return 0
+
     if args.rebuild_prompts:
         records = load_meta(out_dir)
         entries = write_prompts_json(out_dir, records.values())
-        print(f"prompts.json neu geschrieben: {entries} Prompts aus {len(records)} Builds")
+        print(f"prompts.json neu geschrieben: {entries} Strukturen aus {len(records)} Builds")
         print(f"Datei: {out_dir / PROMPTS_FILENAME}")
         return 0
 
@@ -958,7 +1084,7 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         client.close()
 
-    prompt_count = write_prompts_json(out_dir, records.values())
+    entry_count = write_prompts_json(out_dir, records.values())
 
     print("-" * 72)
     print("Ergebnis")
@@ -966,7 +1092,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  uebersprungen             : {counters['skipped']}")
     print(f"  Builds mit Fehlern        : {counters['failed']}")
     print(f"  Struktur-Dateien geladen  : {counters['files']} ({counters['bytes'] / (1024 * 1024):.1f} MB)")
-    print(f"  Prompts in prompts.json   : {prompt_count}")
+    print(f"  Strukturen in prompts.json: {entry_count}")
     print(f"  HTTP-Requests             : {client.request_count} (Retries: {client.retry_count})")
     print(f"  Ausgabe                   : {out_dir}")
 

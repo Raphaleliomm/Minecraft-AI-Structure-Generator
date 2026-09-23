@@ -6,7 +6,9 @@ Main focus: Transformer Diffusion model with frozen pre-trained text encoders
 (Phi-3.5, Gemma 2/3, T5) and cross-attention."""
 from __future__ import annotations
 
+import gc
 import json
+import logging
 import shutil
 import threading
 import time
@@ -20,34 +22,79 @@ import torch
 from PIL import Image
 
 from app.config import AppConfig
+from app.constants import (
+    ALLOWED_GRID_SIZES,
+    DEFAULT_GRID_SIZE_LABEL,
+    GRID_SIZE_MAP,
+    GRID_SIZE_OPTIONS,
+    grid_size_for_label,
+    grid_size_label,
+)
 from app.diffusion_model import (
     VoxelDiffusionModel,
     TransformerDiffusionModel,
+    clamp_num_steps,
     train_diffusion_step,
     train_transformer_diffusion_step,
     train_transformer_diffusion_step_cached,
 )
+from app.grad_accum import (
+    accumulation_enabled,
+    apply_optimizer_step,
+    iter_micro_batches,
+    per_sample_weight_mass,
+)
 from app.model_manager import ModelRegistry, ModelEntry
-from app.transformer_encoder import FrozenTransformerEncoder, list_supported_models, MODEL_NAMES
+from app.paths import EXPORTS_DIR, PROJECTS_DIR, RUNS_DIR, default_data_dirs
+from app.transformer_encoder import (
+    DEFAULT_ENCODER_HIDDEN_DIM,
+    ENCODER_HIDDEN_DIMS,
+    FrozenTransformerEncoder,
+    MODEL_NAMES,
+    encoder_working_set_bytes,
+    list_supported_models,
+)
 from app.hidden_state_cache import (
     compute_hidden_states, load_hidden_states, validate_cache, delete_cache, list_caches,
 )
-from app.voxel_preview import render_preview
+from app.training_memory import (
+    GIB,
+    GENERATION_CONTEXT_TOKENS,
+    describe_generation_plan,
+    describe_training_plan,
+    format_gib,
+    plan_diffusion_training,
+    plan_generation,
+    plan_transformer_training,
+    system_ram_bytes,
+    transformer_generation_bytes,
+    unet_inference_bytes,
+)
+from app.voxel_preview import PreviewRenderer, VoxelScene, view_angles
 from app.voxel_viewer_3d import open_3d_viewer, HAS_PYGLET
 from app.translations import get_text as _get_text
 
-from dataset import PromptTokenizer, VoxelTokenizer, center_token_grid, load_schematic, save_schem, trim_token_grid
+from dataset import (
+    PromptTokenizer,
+    VoxelTokenizer,
+    center_token_grid,
+    collate_context_batch,
+    discover_prompt_files,
+    load_schematic,
+    save_schem,
+    trim_token_grid,
+)
 from model import SharedWeightVoxelTransformer
 from kaggle_export import create_kaggle_export
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("green")
 
+logger = logging.getLogger(__name__)
+
 # ─── Constants ───
 APP_NAME = "Minecraft Structure Generator"
 VERSION = "0.1"
-PROJECTS_DIR = Path("projects")
-EXPORTS_DIR = Path("exports")
 
 # Minecraft-inspired UI skin. The app stays CustomTkinter, but the colors,
 # edges and typography are intentionally closer to the in-game menus.
@@ -69,6 +116,16 @@ MC_RED = "#a84032"
 MC_RED_DARK = "#742a23"
 MC_FONT = "Consolas"
 
+# ─── Preview rendering ───
+# Panels are drawn by a worker thread (app.voxel_preview.PreviewRenderer) so the
+# Tk main loop never blocks on a render. While the camera is dragged the frame is
+# rendered at a lower resolution and upscaled for display; a full quality frame
+# follows right after the interaction stops.
+PREVIEW_SIZE = (420, 380)
+PREVIEW_DRAG_RESOLUTION = 0.6
+PREVIEW_POLL_MS = 20
+PREVIEW_REFRESH_MS = 160
+
 # ─── Transformer Diffusion UNet presets ───
 # Each preset: (display_name, channels, channel_multipliers, d_model, cross_attn_heads)
 TF_DIFFUSION_PRESETS = [
@@ -80,22 +137,31 @@ TF_DIFFUSION_PRESETS = [
     ("XXL (80M)", 128, (1, 2, 3, 4, 4), 256, 8),
 ]
 
-# Grid size options shared across all model types
-GRID_SIZE_OPTIONS = [
-    "16×16×16",
-    "32×32×32",
-    "48×48×48",
-    "64×64×64",
-    "96×96×96（experimentell）",
-    "128×128×128（experimentell）",
-    "256×256×256（experimentell）",
-]
+# ─── Text-Encoder: VRAM oder System-RAM? ───
+# Passt der Encoder schaetzungsweise in diesen Anteil des freien VRAM, wird er
+# ohne Nachfrage auf die GPU geladen.
+ENCODER_VRAM_FRACTION = 0.9
+# Fuer den RAM-Ausweichpfad: fp32 nur, wenn der freie RAM das mit Reserve
+# hergibt (beim Laden entsteht kurzzeitig eine zweite Kopie) und der Encoder
+# klein genug ist (fp32 ist auf der CPU schneller als fp16).
+ENCODER_CPU_RAM_SHARE = 0.5
+ENCODER_CPU_FP32_LIMIT = 1 * GIB
 
-GRID_SIZE_MAP = {}
-for opt in GRID_SIZE_OPTIONS:
-    # Split on × and take first 3 numeric parts
-    parts = opt.replace("（", "×").split("×")[:3]
-    GRID_SIZE_MAP[opt] = tuple(int(p) for p in parts)
+# Grid size options are shared with train.py / generate.py (app/constants.py)
+
+
+def release_cuda_cache() -> None:
+    """Nicht mehr benoetigte CUDA-Bloecke an den Treiber zurueckgeben.
+
+    Der PyTorch-Caching-Allocator behaelt freigegebene Bloecke im eigenen Pool;
+    ``torch.cuda.mem_get_info()`` (die Grundlage der VRAM-Planung) sieht diesen
+    Speicher als *belegt* an. Nach einem Trainingslauf - oder nach einem
+    fehlgeschlagenen Encoder-Aufbau - bleiben so mehrere GB reserviert und die
+    naechste Aktion endet mit "Cuda out of memory", obwohl nichts mehr benutzt
+    wird. Auf der CPU ist der Aufruf ein No-Op.
+    """
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 class MinecraftStructureApp(ctk.CTk):
@@ -122,31 +188,54 @@ class MinecraftStructureApp(ctk.CTk):
         self.current_project_path: Optional[Path] = None
         self.current_preview_img: Optional[ctk.CTkImage] = None
         self.current_view: str = "free"
-        self.model_type: str = "transformer_diffusion"
+        # Startmodell-Typ aus config.json (dort bereits validiert)
+        self.model_type: str = self.config.default_model
         self.transformer_model: Optional[SharedWeightVoxelTransformer] = None
         self.diffusion_model: Optional[VoxelDiffusionModel] = None
         self.tf_diffusion_model: Optional[TransformerDiffusionModel] = None
         self.tf_encoder: Optional[FrozenTransformerEncoder] = None
+        # Einmal pro Sitzung beantwortete Frage "Encoder in den System-RAM?".
+        self._encoder_cpu_choice: Dict[str, bool] = {}
+        # Modell-Loader laufen in eigenen Threads: ohne diese Sperre koennten
+        # zwei gleichzeitig einen 7-GB-Encoder laden (RAM/Rueckfrage-Chaos).
+        self._encoder_load_lock = threading.Lock()
         self.prompt_tokenizer: Optional[PromptTokenizer] = None
         self.voxel_tokenizer: Optional[VoxelTokenizer] = None
         self.current_transformer_name: Optional[str] = None
         self.current_diffusion_name: Optional[str] = None
         self.current_tf_diffusion_name: Optional[str] = None
-        self.data_dirs = [
-            "Trainingsdaten good thoroughly analyzed",
-            "Trainingsdaten zu gross vorerst ausgelagert",
-        ]
+        # Datenordner werden aus app/paths.py abgeleitet (relativ zum Projekt,
+        # unabhängig vom Arbeitsverzeichnis). Der Ordner mit den bewusst
+        # ausgelagerten "zu gross"-Strukturen gehört NICHT dazu.
+        self.data_dirs = default_data_dirs()
         self.generation_running = False
         self.training_running = False
         self._current_training_type: Optional[str] = None
+
+        # Preview rendering runs on a worker thread; the Tk loop only polls for
+        # finished frames (see PREVIEW_* constants above).
+        self.preview_renderer = PreviewRenderer()
+        self._preview_scene_cache: Optional[VoxelScene] = None
+        self._preview_scene_source: Optional[np.ndarray] = None
+        self._preview_scene_palette: Optional[List[str]] = None
+        self._preview_poll_job: Optional[str] = None
+        self._preview_refresh_job: Optional[str] = None
 
         # ─── Build UI ───
         self._build_ui()
         self._setup_tab_icons()
         self._apply_minecraft_skin()
+        self.protocol("WM_DELETE_WINDOW", self._on_window_close)
 
         # ─── Load default models ───
         self.after(100, self._load_models_async)
+
+    def _on_window_close(self):
+        """Stop the preview worker before tearing the window down."""
+        try:
+            self.preview_renderer.stop()
+        finally:
+            self.destroy()
 
     def _tr(self, key: str, **kwargs) -> str:
         """Translate a UI string using the current language."""
@@ -441,6 +530,8 @@ class MinecraftStructureApp(ctk.CTk):
         self.zoom_slider.grid(row=0, column=5, padx=(0, 4))
         self.zoom_slider.set(self.zoom_scale)
         self.zoom_slider.configure(command=lambda v: self._update_zoom(v))
+        # while the slider is dragged only low resolution frames are drawn
+        self.zoom_slider.bind("<ButtonRelease-1>", lambda _event: self._update_preview())
 
         self.preview_label = ctk.CTkLabel(right, text=self._tr("preview_hint"),
                                           font=("Segoe UI", 14))
@@ -604,7 +695,7 @@ class MinecraftStructureApp(ctk.CTk):
                     f"FFN={entry.dim_feedforward}  {bl}={entry.block_vocab_size}")
         elif entry.model_type == "transformer_diffusion":
             info = (f"d_model={entry.d_model}  channels={entry.channels}  steps={entry.num_timesteps}  "
-                    f"encoder={entry.encoder_name or '?'}  {bl}={entry.block_vocab_size}")
+                    f"ctx={entry.context_dim}  encoder={entry.encoder_name or '?'}  {bl}={entry.block_vocab_size}")
         else:
             info = (f"d_model={entry.d_model}  channels={entry.channels}  steps={entry.num_timesteps}  "
                     f"{bl}={entry.block_vocab_size}")
@@ -679,74 +770,216 @@ class MinecraftStructureApp(ctk.CTk):
         self._show_train_more_dialog(name, entry)
 
     def _show_train_more_dialog(self, name: str, entry: ModelEntry):
+        """Dialog fuer 'Weiter trainieren' eines vorhandenen Checkpoints.
+
+        Spiegelt den Training-Tab (gleiche Parameter, gleiche Worker), aber die
+        Architektur kommt aus dem Checkpoint: Ziel ist es, genau dieses Modell
+        fortzusetzen. Deshalb gibt es hier keine Modellgroessen-/UNet-Auswahl -
+        die wuerde nur ein neues Modell erzeugen - und das Grid ist durch den
+        Checkpoint vorgegeben.
+        """
+        width = 620
+        height = min(760, max(480, self.winfo_screenheight() - 140))
         dialog = ctk.CTkToplevel(self)
         dialog.title(self._tr("train_more_title", name=name))
-        dialog.geometry("480x500")
-        dialog.resizable(False, False)
+        dialog.geometry(f"{width}x{height}")
+        dialog.resizable(False, True)
         dialog.transient(self)
         dialog.grab_set()
         dialog.update_idletasks()
-        x = self.winfo_x() + (self.winfo_width() - 480) // 2
-        y = self.winfo_y() + (self.winfo_height() - 500) // 2
+        x = self.winfo_x() + (self.winfo_width() - width) // 2
+        y = max(0, self.winfo_y() + (self.winfo_height() - height) // 2)
         dialog.geometry(f"+{x}+{y}")
         dialog.grid_columnconfigure(0, weight=1)
+        dialog.grid_rowconfigure(1, weight=1)
         self._safe_configure(dialog, fg_color=MC_BG)
 
         header = ctk.CTkFrame(dialog, fg_color="transparent")
-        header.grid(row=0, column=0, sticky="ew", padx=20, pady=(20, 12))
+        header.grid(row=0, column=0, sticky="ew", padx=20, pady=(18, 10))
         header.grid_columnconfigure(0, weight=1)
         icon = {"transformer": "TF", "diffusion": "DF", "transformer_diffusion": "TF-DF"}.get(entry.model_type, "MD")
-        ctk.CTkLabel(header, text=self._tr("train_more_header", icon=icon, name=name), font=("Segoe UI", 16, "bold")).grid(row=0, column=0, sticky="w")
+        ctk.CTkLabel(header, text=self._tr("train_more_header", icon=icon, name=name),
+                     font=("Segoe UI", 16, "bold")).grid(row=0, column=0, sticky="w")
 
-        info_frame = ctk.CTkFrame(dialog, fg_color=("gray90", "gray15"), corner_radius=6)
-        info_frame.grid(row=1, column=0, sticky="ew", padx=20, pady=(0, 16))
+        body = ctk.CTkScrollableFrame(dialog, corner_radius=10)
+        body.grid(row=1, column=0, sticky="nsew", padx=14, pady=(0, 8))
+        body.grid_columnconfigure(0, weight=1)
+
+        # ─── Checkpoint-Info ───
+        info_frame = ctk.CTkFrame(body, fg_color=("gray90", "gray15"), corner_radius=6)
+        info_frame.grid(row=0, column=0, sticky="ew", pady=(0, 12))
         info_frame.grid_columnconfigure(0, weight=1)
         gs = f"{entry.grid_size[0]}×{entry.grid_size[1]}×{entry.grid_size[2]}"
-        info_text = f"{gs}  |  {entry.model_type.upper()}"
+        info_lines = [f"{gs}  |  {entry.model_type.upper()}  |  {self._tr('blocks_label')}: {entry.block_vocab_size}"]
+        if entry.model_type == "transformer":
+            info_lines.append(f"d_model={entry.d_model}  heads={entry.nhead}  layers={entry.num_layers}  "
+                              f"FFN={entry.dim_feedforward}")
+        elif entry.model_type == "transformer_diffusion":
+            info_lines.append(f"d_model={entry.d_model}  channels={entry.channels}  "
+                              f"steps={entry.num_timesteps}  ctx={entry.context_dim}")
+            info_lines.append(self._tr("tm_encoder_used", name=entry.encoder_name or "?"))
+        else:
+            info_lines.append(f"d_model={entry.d_model}  channels={entry.channels}  "
+                              f"steps={entry.num_timesteps}")
         if entry.epochs_trained > 0:
-            info_text += f"\n{entry.epochs_trained} {self._tr('epochs_label')}  |  Loss: {entry.last_loss:.4f}"
-        ctk.CTkLabel(info_frame, text=info_text, font=("Segoe UI", 11), justify="left").grid(row=0, column=0, sticky="w", padx=14, pady=10)
+            info_lines.append(f"{entry.epochs_trained} {self._tr('epochs_label')}  |  Loss: {entry.last_loss:.4f}")
+        ctk.CTkLabel(info_frame, text="\n".join(info_lines), font=("Segoe UI", 11),
+                     justify="left").grid(row=0, column=0, sticky="w", padx=14, pady=10)
+        ctk.CTkLabel(info_frame, text=self._tr("tm_continue_info", name=name, path=entry.path),
+                     font=("Segoe UI", 10), text_color=("#7c3aed", "#c084fc"),
+                     justify="left", wraplength=520).grid(row=1, column=0, sticky="w", padx=14, pady=(0, 10))
 
-        params = ctk.CTkFrame(dialog, fg_color="transparent")
-        params.grid(row=2, column=0, sticky="ew", padx=20, pady=(0, 12))
+        row = 1
+        ctk.CTkLabel(body, text=self._tr("tm_cont_arch", type=entry.model_type.upper()),
+                     font=("Segoe UI", 12, "bold"), text_color="#c084fc").grid(row=row, column=0, sticky="w")
+        row += 1
+        if entry.model_type in ("diffusion", "transformer_diffusion"):
+            ctk.CTkLabel(body, text=self._tr("tm_steps_fixed", steps=entry.num_timesteps or 50),
+                         font=("Segoe UI", 10), text_color=("gray50", "gray40")).grid(
+                row=row, column=0, sticky="w", pady=(2, 4))
+            row += 1
+
+        # ─── Hidden-State-Cache (nur TF-Diffusion, wie im Training-Tab) ───
+        cache_var = ctk.BooleanVar(value=False)
+        cache_combo = None
+        cache_status = None
+        cache_dims: Dict[str, int] = {}
+
+        def _cache_dim(cache_label: str) -> int:
+            return cache_dims.get(cache_label, 0)
+
+        def _update_cache_status(*_args) -> None:
+            if cache_status is None:
+                return
+            if not cache_var.get():
+                cache_status.configure(text=self._tr("no_cache_used"),
+                                       text_color=("gray50", "gray40"))
+                return
+            if cache_combo is None or cache_combo.get() == self._tr("no_cache"):
+                cache_status.configure(text=self._tr("select_cache_first"),
+                                       text_color=("#f59e0b", "#fbbf24"))
+                return
+            dim = _cache_dim(cache_combo.get())
+            if entry.context_dim and dim and dim != entry.context_dim:
+                cache_status.configure(
+                    text=self._tr("tm_cache_dim_mismatch", dim=dim, need=entry.context_dim),
+                    text_color="#f87171")
+                return
+            cache_status.configure(
+                text=self._tr("tm_cache_dim", dim=dim or "?", need=entry.context_dim or "?"),
+                text_color="#34d399")
+
+        if entry.model_type == "transformer_diffusion":
+            cache_frame = ctk.CTkFrame(body, fg_color="transparent")
+            cache_frame.grid(row=row, column=0, sticky="ew", pady=(0, 8))
+            cache_frame.grid_columnconfigure(0, weight=1)
+            ctk.CTkLabel(cache_frame, text=self._tr("hidden_states"), font=("Segoe UI", 13, "bold"),
+                         text_color="#34d399").grid(row=0, column=0, sticky="w", pady=(0, 2))
+            ctk.CTkSwitch(cache_frame, text=self._tr("use_cached_hs"), variable=cache_var,
+                          onvalue=True, offvalue=False,
+                          command=_update_cache_status).grid(row=1, column=0, sticky="w", pady=2)
+            cache_sel_frame = ctk.CTkFrame(cache_frame, fg_color="transparent")
+            cache_sel_frame.grid(row=2, column=0, sticky="ew", pady=2)
+            cache_sel_frame.grid_columnconfigure(1, weight=1)
+            ctk.CTkLabel(cache_sel_frame, text=self._tr("select_cache"), font=("Segoe UI", 11)).grid(
+                row=0, column=0, sticky="w", padx=(0, 6))
+            cache_dims = {c["encoder_name"]: int(c.get("hidden_dim") or 0) for c in list_caches()}
+            cache_combo = ctk.CTkOptionMenu(
+                cache_sel_frame, values=list(cache_dims) or [self._tr("no_cache")],
+                font=("Segoe UI", 10), width=220, command=_update_cache_status)
+            cache_combo.grid(row=0, column=1, sticky="w")
+            cache_status = ctk.CTkLabel(cache_frame, text=self._tr("no_cache_used"), font=("Segoe UI", 10),
+                                        justify="left", wraplength=520)
+            cache_status.grid(row=3, column=0, sticky="w", pady=(2, 0))
+            row += 1
+
+        # ─── Trainingsparameter (wie im Training-Tab) ───
+        params = ctk.CTkFrame(body, fg_color="transparent")
+        params.grid(row=row, column=0, sticky="ew", pady=(0, 6))
         params.grid_columnconfigure(1, weight=1)
-        ctk.CTkLabel(params, text=self._tr("params_label"), font=("Segoe UI", 13, "bold")).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
+        ctk.CTkLabel(params, text=self._tr("training_params"), font=("Segoe UI", 13, "bold")).grid(
+            row=0, column=0, columnspan=3, sticky="w", pady=(0, 8))
 
-        ctk.CTkLabel(params, text=self._tr("tm_epochs"), font=("Segoe UI", 12)).grid(row=1, column=0, sticky="w", padx=(0, 12), pady=4)
+        def add_entry_row(grid_row: int, label: str, var: ctk.StringVar) -> None:
+            ctk.CTkLabel(params, text=label, font=("Segoe UI", 12)).grid(
+                row=grid_row, column=0, sticky="w", padx=(0, 12), pady=4)
+            ctk.CTkEntry(params, width=120, textvariable=var, font=("Segoe UI", 12)).grid(
+                row=grid_row, column=1, sticky="w", pady=4)
+
         epochs_var = ctk.StringVar(value="10")
-        ctk.CTkEntry(params, width=120, textvariable=epochs_var, font=("Segoe UI", 12)).grid(row=1, column=1, sticky="w", pady=4)
-        ctk.CTkLabel(params, text=self._tr("tm_batch_size"), font=("Segoe UI", 12)).grid(row=2, column=0, sticky="w", padx=(0, 12), pady=4)
+        add_entry_row(1, self._tr("tm_epochs"), epochs_var)
         batch_var = ctk.StringVar(value="4")
-        ctk.CTkEntry(params, width=120, textvariable=batch_var, font=("Segoe UI", 12)).grid(row=2, column=1, sticky="w", pady=4)
-        ctk.CTkLabel(params, text=self._tr("tm_learning_rate"), font=("Segoe UI", 12)).grid(row=3, column=0, sticky="w", padx=(0, 12), pady=4)
+        add_entry_row(2, self._tr("tm_batch_size"), batch_var)
         lr_var = ctk.StringVar(value="1.5e-3")
-        ctk.CTkEntry(params, width=120, textvariable=lr_var, font=("Segoe UI", 12)).grid(row=3, column=1, sticky="w", pady=4)
+        add_entry_row(3, self._tr("tm_learning_rate"), lr_var)
 
-        ctk.CTkLabel(params, text=self._tr("tm_diversity"), font=("Segoe UI", 12)).grid(row=4, column=0, sticky="w", padx=(0, 12), pady=4)
+        epochs_total = ctk.CTkLabel(params, text="", font=("Segoe UI", 10),
+                                    text_color=("gray50", "gray40"))
+        epochs_total.grid(row=4, column=0, columnspan=3, sticky="w", pady=(0, 2))
+
+        def _update_epochs_total(*_args) -> None:
+            try:
+                new_epochs = int(str(epochs_var.get()).strip())
+            except (TypeError, ValueError):
+                epochs_total.configure(text=self._tr("tm_epochs_new", new="?"))
+                return
+            done = max(0, int(entry.epochs_trained or 0))
+            epochs_total.configure(text=self._tr("tm_epochs_total", done=done, new=new_epochs,
+                                                total=done + new_epochs))
+
+        epochs_var.trace_add("write", _update_epochs_total)
+        _update_epochs_total()
+
+        ctk.CTkLabel(params, text=self._tr("tm_air_weight"), font=("Segoe UI", 12)).grid(
+            row=5, column=0, sticky="w", padx=(0, 12), pady=(8, 0))
+        air_var = ctk.DoubleVar(value=75.0)
+        air_value = ctk.CTkLabel(params, text="75", width=28)
+        ctk.CTkSlider(params, from_=50, to=100, number_of_steps=50, variable=air_var,
+                      command=lambda v: air_value.configure(text=str(int(round(float(v)))))).grid(
+            row=5, column=1, sticky="ew", pady=(8, 0))
+        air_value.grid(row=5, column=2, sticky="w", padx=(8, 0), pady=(8, 0))
+
+        ctk.CTkLabel(params, text=self._tr("tm_diversity"), font=("Segoe UI", 12)).grid(
+            row=6, column=0, sticky="w", padx=(0, 12), pady=4)
         aug_var = ctk.DoubleVar(value=1)
         aug_value = ctk.CTkLabel(params, text="1", width=28)
         ctk.CTkSlider(params, from_=0, to=5, number_of_steps=5, variable=aug_var,
-                      command=lambda v: aug_value.configure(text=str(int(round(float(v)))))).grid(row=4, column=1, sticky="ew", pady=4)
-        aug_value.grid(row=4, column=2, sticky="w", padx=(8, 0), pady=4)
-        aug_vertical_switch = ctk.CTkSwitch(params, text=self._tr("allow_vertical"), onvalue=True, offvalue=False)
-        aug_vertical_switch.grid(row=5, column=0, columnspan=3, sticky="w", pady=(4, 0))
+                      command=lambda v: aug_value.configure(text=str(int(round(float(v)))))).grid(
+            row=6, column=1, sticky="ew", pady=4)
+        aug_value.grid(row=6, column=2, sticky="w", padx=(8, 0), pady=4)
+
+        aug_vertical_switch = ctk.CTkSwitch(params, text=self._tr("allow_vertical"),
+                                            onvalue=True, offvalue=False)
+        aug_vertical_switch.grid(row=7, column=0, columnspan=3, sticky="w", pady=(4, 0))
+
+        # Batch-Groesse halten (Gradient Accumulation) - wie im Training-Tab.
+        grad_accum_var = ctk.BooleanVar(value=accumulation_enabled())
+        grad_accum_switch = ctk.CTkSwitch(params, text=self._tr("grad_accum"),
+                                          variable=grad_accum_var,
+                                          onvalue=True, offvalue=False)
+        grad_accum_switch.grid(row=8, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        ctk.CTkLabel(params, text=self._tr("grad_accum_hint"), font=("Segoe UI", 9),
+                     text_color=("gray50", "gray40"), justify="left", wraplength=520).grid(
+            row=9, column=0, columnspan=3, sticky="w")
 
         gpu_avail = torch.cuda.is_available() and self.config.gpu_enabled
-        gpu_text = f"GPU: {'CUDA verfuegbar' if gpu_avail else 'CPU only'}" if self.config.language == "de" else f"GPU: {'CUDA available' if gpu_avail else 'CPU only'}"
+        gpu_text = self._tr("tm_gpu_on") if gpu_avail else self._tr("tm_gpu_off")
         ctk.CTkLabel(params, text=gpu_text,
                      font=("Segoe UI", 11), text_color="#34d399" if gpu_avail else "#f87171",
-                     ).grid(row=6, column=0, columnspan=3, sticky="w", pady=(8, 0))
+                     ).grid(row=10, column=0, columnspan=3, sticky="w", pady=(8, 0))
+
 
         btn_frame = ctk.CTkFrame(dialog, fg_color="transparent")
-        btn_frame.grid(row=3, column=0, sticky="ew", padx=20, pady=(8, 20))
+        btn_frame.grid(row=2, column=0, sticky="ew", padx=20, pady=(8, 18))
         btn_frame.grid_columnconfigure(0, weight=1)
         btn_frame.grid_columnconfigure(1, weight=1)
 
         def on_start():
             try:
-                epochs = int(epochs_var.get().strip())
-                batch = int(batch_var.get().strip())
-                lr = float(lr_var.get().strip())
+                epochs = int(str(epochs_var.get()).strip())
+                batch = int(str(batch_var.get()).strip())
+                lr = float(str(lr_var.get()).strip())
+                air_weight = float(air_var.get())
                 aug = int(round(float(aug_var.get())))
                 allow_vertical = bool(aug_vertical_switch.get())
                 if epochs <= 0 or batch <= 0 or lr <= 0 or aug < 0:
@@ -754,23 +987,29 @@ class MinecraftStructureApp(ctk.CTk):
             except (ValueError, TypeError):
                 self.status_var.set(self._tr("status_invalid_params"))
                 return
+            if self.training_running:
+                self.status_var.set(self._tr("status_training_running"))
+                return
+            use_cache = False
+            cache_name = None
+            if entry.model_type == "transformer_diffusion" and bool(cache_var.get()):
+                cache_name = cache_combo.get() if cache_combo is not None else self._tr("no_cache")
+                if cache_name == self._tr("no_cache"):
+                    self.status_var.set(self._tr("status_no_cache"))
+                    return
+                dim = _cache_dim(cache_name)
+                if entry.context_dim and dim and dim != entry.context_dim:
+                    self.status_var.set(self._tr("tm_cache_dim_mismatch",
+                                                 dim=dim, need=entry.context_dim))
+                    return
+                use_cache = True
             dialog.destroy()
-            self._load_single_model(name)
-            # Apply parameters to training tab
-            self.train_epochs_entry.delete(0, "end")
-            self.train_epochs_entry.insert(0, str(epochs))
-            self.train_batch_entry.delete(0, "end")
-            self.train_batch_entry.insert(0, str(batch))
-            self.train_lr_entry.delete(0, "end")
-            self.train_lr_entry.insert(0, str(lr))
-            self.augmentation_diversity_var.set(aug)
-            self._update_aug_label(aug)
-            if allow_vertical:
-                self.setting_aug_vertical.select()
-            else:
-                self.setting_aug_vertical.deselect()
-            self.tab_view.set(self._tr("tab_training"))
-            self.after(300, lambda: self._start_training(entry.model_type))
+            self._start_train_more(entry, {
+                "epochs": epochs, "batch_size": batch, "lr": lr, "air_weight": air_weight,
+                "augmentation_diversity": aug, "allow_vertical_movement": allow_vertical,
+                "use_cached": use_cache, "cache_name": cache_name,
+                "grad_accum": bool(grad_accum_var.get()),
+            })
 
         ctk.CTkButton(btn_frame, text=self._tr("btn_start_training"), font=("Segoe UI", 13, "bold"),
                       height=36, fg_color="#7c3aed", hover_color="#6d28d9", command=on_start,
@@ -779,6 +1018,93 @@ class MinecraftStructureApp(ctk.CTk):
                       fg_color="gray40", hover_color="gray50", command=dialog.destroy,
                      ).grid(row=0, column=1, sticky="ew", padx=(4, 0))
         self._skin_widget_tree(dialog)
+
+    def _start_train_more(self, entry: ModelEntry, params: Dict[str, Any]) -> None:
+        """'Weiter trainieren' fuer genau diesen Checkpoint starten.
+
+        Die Dialogwerte werden in den Training-Tab gespiegelt und dann die
+        normalen Einstiegspunkte mit ``continue_from`` gestartet: beide Wege
+        benutzen dieselben Worker und dieselben Fortschrittsbalken. Die
+        Architektur kommt aus dem Checkpoint, deshalb wird hier nichts an
+        Modellgroesse/UNet-Preset veraendert.
+        """
+        if self.training_running:
+            self.status_var.set(self._tr("status_training_running"))
+            return
+        grid_size = tuple(entry.grid_size)
+        self._sync_training_widgets(entry, params)
+        overrides: Dict[str, Any] = {
+            "epochs": params["epochs"],
+            "batch_size": params["batch_size"],
+            "lr": params["lr"],
+            "air_weight": params["air_weight"],
+            "augmentation_diversity": params["augmentation_diversity"],
+            "allow_vertical_movement": params["allow_vertical_movement"],
+            "grad_accum": bool(params.get("grad_accum", True)),
+            "grid_size": grid_size,
+        }
+        if entry.model_type == "transformer_diffusion":
+            overrides["use_cached"] = bool(params.get("use_cached"))
+            overrides["cache_name"] = params.get("cache_name")
+            self._start_tf_diffusion_training(continue_from=entry.name, overrides=overrides)
+        else:
+            self._start_training(entry.model_type, grid_size=grid_size,
+                                 overrides=overrides, continue_from=entry.name)
+
+    def _sync_training_widgets(self, entry: ModelEntry, params: Dict[str, Any]) -> None:
+        """Dialogwerte in den Training-Tab spiegeln (Anzeige, nicht Berechnung).
+
+        Der Dialog hat keine eigenen Fortschrittsanzeigen: das Training laeuft
+        sichtbar im Training-Tab weiter. Damit Anzeige und Lauf zusammenpassen,
+        werden Panel, Grid und Parameter dort auf den Checkpoint gesetzt -
+        gerechnet wird mit den Werten aus dem Dialog (siehe _start_train_more).
+        """
+        panel_label = {"transformer": "Transformer", "diffusion": "Diffusion",
+                       "transformer_diffusion": "TF-Diffusion"}.get(entry.model_type)
+        if panel_label:
+            self.train_model_type_selector.set(panel_label)
+            self._on_train_type_change(panel_label)
+        grid_label = grid_size_label(entry.grid_size)
+        if grid_label:
+            self.grid_size_var.set(grid_label)
+
+        def _set_entry(widget, value) -> None:
+            widget.delete(0, "end")
+            widget.insert(0, str(value))
+
+        _set_entry(self.train_epochs_entry, params["epochs"])
+        _set_entry(self.train_batch_entry, params["batch_size"])
+        _set_entry(self.train_lr_entry, params["lr"])
+        self.augmentation_diversity_var.set(params["augmentation_diversity"])
+        self._update_aug_label(params["augmentation_diversity"])
+        if hasattr(self, "air_weight_var"):
+            self.air_weight_var.set(params["air_weight"])
+            self._update_air_weight_label(params["air_weight"])
+        if params["allow_vertical_movement"]:
+            self.setting_aug_vertical.select()
+        else:
+            self.setting_aug_vertical.deselect()
+        if hasattr(self, "setting_grad_accum"):
+            if params.get("grad_accum", True):
+                self.setting_grad_accum.select()
+            else:
+                self.setting_grad_accum.deselect()
+        if entry.model_type == "transformer_diffusion":
+            try:
+                self.tf_encoder_combo.set(entry.encoder_name or "Phi-3.5-mini")
+            except Exception:  # Encoder nicht in der Liste: Auswahl belassen
+                pass
+            self.tf_use_cached_hs_var.set(bool(params.get("use_cached")))
+            if params.get("cache_name"):
+                try:
+                    self.tf_cache_selector.set(params["cache_name"])
+                except Exception:
+                    pass
+            if entry.num_timesteps:
+                _set_entry(self.tf_diff_steps_entry, entry.num_timesteps)
+        elif entry.model_type == "diffusion" and entry.num_timesteps:
+            _set_entry(self.diff_train_steps_entry, entry.num_timesteps)
+        self.tab_view.set(self._tr("tab_training"))
 
     def _rename_model_dialog(self, old_name: str):
         dialog = ctk.CTkInputDialog(title=self._tr("rename_title"), text=self._tr("rename_prompt", old=old_name))
@@ -913,13 +1239,13 @@ class MinecraftStructureApp(ctk.CTk):
 
         ctk.CTkLabel(param_grid, text=self._tr("aug_diversity")).grid(
             row=2, column=0, sticky="w", padx=(0, 8), pady=(8, 0))
-        self.augmentation_diversity_var = ctk.DoubleVar(value=1)
+        self.augmentation_diversity_var = ctk.DoubleVar(value=0)
         self.augmentation_diversity_slider = ctk.CTkSlider(
             param_grid, from_=0, to=5, number_of_steps=5,
             variable=self.augmentation_diversity_var, command=self._update_aug_label,
         )
         self.augmentation_diversity_slider.grid(row=2, column=1, columnspan=2, sticky="ew", pady=(8, 0))
-        self.augmentation_diversity_label = ctk.CTkLabel(param_grid, text="1", width=28)
+        self.augmentation_diversity_label = ctk.CTkLabel(param_grid, text="0", width=28)
         self.augmentation_diversity_label.grid(row=2, column=3, sticky="w", pady=(8, 0))
 
         self.setting_aug_vertical = ctk.CTkSwitch(param_grid, text=self._tr("allow_vertical"),
@@ -938,6 +1264,20 @@ class MinecraftStructureApp(ctk.CTk):
         ctk.CTkLabel(param_grid, text=self._tr("air_weight_hint"),
                      font=("Segoe UI", 9), text_color=("gray50", "gray40")).grid(
             row=5, column=0, columnspan=4, sticky="w", pady=(0, 4))
+
+        # ── Gradient Accumulation ──
+        # Ohne diesen Schalter verkleinert der VRAM-Guard den Batch dauerhaft;
+        # mit ihm bleiben die Gradienten ueber mehrere Mikro-Batches erhalten und
+        # der Optimizer-Schritt sieht weiterhin den gewuenschten Batch.
+        self.grad_accum_var = ctk.BooleanVar(value=accumulation_enabled())
+        self.setting_grad_accum = ctk.CTkSwitch(
+            param_grid, text=self._tr("grad_accum"), variable=self.grad_accum_var,
+            onvalue=True, offvalue=False)
+        self.setting_grad_accum.grid(row=6, column=0, columnspan=4, sticky="w", pady=(6, 0))
+        ctk.CTkLabel(param_grid, text=self._tr("grad_accum_hint"),
+                     font=("Segoe UI", 9), text_color=("gray50", "gray40"),
+                     justify="left", wraplength=520).grid(
+            row=7, column=0, columnspan=4, sticky="w", pady=(0, 2))
 
         # ─── Progress Display ───
         progress_frame = ctk.CTkFrame(scroll, fg_color="transparent")
@@ -1280,45 +1620,203 @@ class MinecraftStructureApp(ctk.CTk):
 
     def _load_tf_encoder_worker(self, model_name: str):
         try:
-            device = torch.device("cuda" if torch.cuda.is_available() and self.config.gpu_enabled else "cpu")
-            dtype = torch.float16 if device.type == "cuda" else torch.float32
-            encoder = FrozenTransformerEncoder(model_name=model_name, device=device, dtype=dtype)
+            # Ein expliziter Klick darf die VRAM/RAM-Frage erneut stellen.
+            self._encoder_cpu_choice.pop(model_name, None)
+            encoder = self._create_tf_encoder(model_name)
             self.tf_encoder = encoder
+            location = "CPU" if encoder.device.type == "cpu" else "GPU"
             self.after(0, lambda: self.tf_encoder_status.configure(
-                text=self._tr("encoder_loaded_info", name=model_name, dim=encoder.hidden_dim)))
+                text=self._tr("encoder_loaded_info", name=model_name,
+                              dim=encoder.hidden_dim, device=location)))
             self.after(0, lambda: self.status_var.set(self._tr("status_encoder_loaded", name=model_name)))
         except Exception as exc:
             err_msg = str(exc)
+            lowered = err_msg.lower()
+            if "out of memory" in lowered:
+                # Klare Meldung statt nacktem CUDA-Fehler (Encoder zu gross).
+                err_msg = self._tr("encoder_vram_error", name=model_name)
+                release_cuda_cache()
+            elif isinstance(exc, MemoryError) or "allocate memory" in lowered:
+                # Auch der Ausweichpfad in den System-RAM ist gescheitert.
+                err_msg = self._tr("encoder_ram_error", name=model_name)
             self.after(0, lambda m=err_msg: self.tf_encoder_status.configure(
                 text=self._tr("cache_error", msg=m[:60])))
             self.after(0, lambda m=err_msg: self.status_var.set(self._tr("status_encoder_error", msg=m[:40])))
 
-    def _start_tf_diffusion_training(self):
+    # ─── Text-Encoder laden (VRAM, bei Bedarf nach Rueckfrage System-RAM) ───
+
+    def _ask_yes_no_blocking(self, title: str, question: str) -> bool:
+        """Ja/Nein-Dialog aus einem Worker-Thread heraus anzeigen.
+
+        Tk laeuft im Main-Thread, das Modell-Laden im Worker - der Dialog wird
+        deshalb per ``after`` an den Main-Thread gereicht und hier auf die
+        Antwort gewartet.
+        """
+        from tkinter.messagebox import askyesno
+
+        answer = {"value": False}
+        answered = threading.Event()
+
+        def show():
+            try:
+                answer["value"] = bool(askyesno(title, question))
+            finally:
+                answered.set()
+
+        self.after(0, show)
+        answered.wait(timeout=300)
+        return bool(answer["value"])
+
+    def _encoder_vram_fits(self, model_name: str) -> bool:
+        """Schaetzung: passt der Encoder (fp16) in den freien VRAM?"""
+        estimated = encoder_working_set_bytes(model_name, item_bytes=2)
+        if not estimated or not (torch.cuda.is_available() and self.config.gpu_enabled):
+            return True
+        free_bytes, _total = torch.cuda.mem_get_info()
+        return estimated <= free_bytes * ENCODER_VRAM_FRACTION
+
+    def _request_encoder_cpu(self, model_name: str) -> bool:
+        """Fragt (einmal pro Sitzung) nach dem Ausweichpfad in den System-RAM."""
+        chosen = self._encoder_cpu_choice.get(model_name)
+        if chosen is not None:
+            return chosen
+        estimated = encoder_working_set_bytes(model_name, item_bytes=2)
+        ram_bytes = system_ram_bytes()
+        free_bytes, _total = torch.cuda.mem_get_info()
+        question = self._tr(
+            "encoder_cpu_question", name=model_name,
+            need=f"{estimated / GIB:.1f}" if estimated else "?",
+            vram=format_gib(free_bytes),
+            ram=f"{ram_bytes / GIB:.1f}" if ram_bytes else "?")
+        if ram_bytes and estimated and estimated > ram_bytes:
+            question += self._tr("encoder_cpu_ram_warning")
+        wants_cpu = self._ask_yes_no_blocking(self._tr("encoder_cpu_title"), question)
+        self._encoder_cpu_choice[model_name] = wants_cpu
+        return wants_cpu
+
+    def _encoder_cpu_dtype(self, model_name: str) -> torch.dtype:
+        """dtype fuer den Encoder im RAM: fp32, wenn der Speicher sicher reicht.
+
+        Phi-3.5-mini braucht in fp32 ~15 GB (mehr als 16-GB-Rechner haben), in
+        fp16 ~7,6 GB; kleine Encoder (Flan-T5-small) laufen in fp32 schneller.
+        """
+        fp32_bytes = encoder_working_set_bytes(model_name, item_bytes=4)
+        ram_bytes = system_ram_bytes()
+        ram_enough = ram_bytes is None or fp32_bytes <= ram_bytes * ENCODER_CPU_RAM_SHARE
+        if not fp32_bytes or (ram_enough and fp32_bytes <= ENCODER_CPU_FP32_LIMIT):
+            return torch.float32
+        return torch.float16
+
+    def _build_tf_encoder(self, model_name: str,
+                          device: torch.device) -> FrozenTransformerEncoder:
+        """Encoder auf dem gewuenschten Geraet bauen (GPU und RAM-Fallback fp16)."""
+        dtype = (torch.float16 if device.type == "cuda"
+                 else self._encoder_cpu_dtype(model_name))
+        return FrozenTransformerEncoder(model_name=model_name, device=device, dtype=dtype)
+
+    def _create_tf_encoder(self, model_name: str) -> FrozenTransformerEncoder:
+        """Encoder laden - passt er nicht in den VRAM, nach Rueckfrage in den RAM.
+
+        Phi-3.5-mini braucht in fp16 rund 7,6 GB VRAM; auf einer 6-GB-Karte
+        (GTX 1060) scheiterte der Aufbau bisher mit "Cuda out of memory" und die
+        Generierung meldete danach "kein Modell". Passt der Encoder nicht in den
+        VRAM, fragt die App einmal je Encoder, ob er stattdessen in den
+        System-RAM geladen wird (fp16, damit 16-GB-Rechner reichen) - er rechnet
+        dann auf der CPU: langsamer, aber benutzbar.
+
+        Serialisiert: zwei Model-Loader-Threads duerfen nicht gleichzeitig einen
+        mehrere GB grossen Encoder aufbauen.
+        """
+        with self._encoder_load_lock:
+            return self._create_tf_encoder_locked(model_name)
+
+    def _create_tf_encoder_locked(self, model_name: str) -> FrozenTransformerEncoder:
+        gpu = torch.device("cuda" if torch.cuda.is_available() and self.config.gpu_enabled
+                           else "cpu")
+        if gpu.type == "cpu":
+            return self._build_tf_encoder(model_name, gpu)
+
+        if not self._encoder_vram_fits(model_name) and self._request_encoder_cpu(model_name):
+            return self._load_tf_encoder_on_cpu(model_name)
+
+        try:
+            return self._build_tf_encoder(model_name, gpu)
+        except RuntimeError as exc:
+            if "out of memory" not in str(exc).lower():
+                raise
+            # Die Schaetzung war zu optimistisch - jetzt doch fragen.
+            release_cuda_cache()
+            gc.collect()
+            if not self._request_encoder_cpu(model_name):
+                hint = self._tr("encoder_vram_error", name=model_name)
+                logger.error("%s (%s)", hint, exc)
+                raise RuntimeError(f"{hint} ({exc})") from exc
+            return self._load_tf_encoder_on_cpu(model_name)
+
+    def _load_tf_encoder_on_cpu(self, model_name: str) -> FrozenTransformerEncoder:
+        """Encoder im System-RAM laden (langsamer, aber ohne VRAM-Bedarf)."""
+        self.after(0, lambda: self.status_var.set(
+            self._tr("status_encoder_cpu", name=model_name)))
+        try:
+            return self._build_tf_encoder(model_name, torch.device("cpu"))
+        except Exception:
+            # Beim naechsten Mal wieder fragen (z.B. war der RAM voll).
+            self._encoder_cpu_choice.pop(model_name, None)
+            raise
+
+    def _tf_diffusion_request(self) -> Dict[str, Any]:
+        """TF-Diffusion-Einstellungen aus dem Training-Tab (nur Main-Thread)."""
+        return {
+            "use_cached": bool(self.tf_use_cached_hs_var.get()),
+            "cache_name": self.tf_cache_selector.get(),
+            "num_timesteps": self._read_int_entry(self.tf_diff_steps_entry, 50),
+            "grid_size": self._get_selected_grid_size(),
+            "augmentation_diversity": int(round(float(self.augmentation_diversity_var.get()))),
+            "allow_vertical_movement": bool(self.setting_aug_vertical.get()),
+        }
+
+    def _start_tf_diffusion_training(self, continue_from: Optional[str] = None,
+                                     overrides: Optional[Dict[str, Any]] = None) -> None:
+        """TF-Diffusion-Training starten (neues Modell oder 'Weiter trainieren').
+
+        ``continue_from`` nennt den Checkpoint, der fortgesetzt wird; der Worker
+        laedt Encoder, Vokabular und Architektur dann daraus (siehe
+        _prepare_tf_diffusion_continue).
+        """
         if self.training_running:
             return
-        use_cached = self.tf_use_cached_hs_var.get()
-        if not use_cached and self.tf_encoder is None:
-            self.status_var.set(self._tr("status_no_encoder"))
-            return
+        params = self._collect_training_params()
+        params.update(self._tf_diffusion_request())
+        if overrides:
+            params.update(overrides)
+        use_cached = bool(params["use_cached"])
+        cache_name = params.get("cache_name")
         if use_cached:
-            cache_sel = self.tf_cache_selector.get()
-            if cache_sel == self._tr("no_cache"):
+            if not cache_name or cache_name == self._tr("no_cache"):
                 self.status_var.set(self._tr("status_no_cache"))
                 return
             # Validate cache exists
-            encoder_name = cache_sel
             schem_files, txt_files = self._get_training_schem_files()
-            result = validate_cache(encoder_name, schem_files, txt_files)
+            result = validate_cache(cache_name, schem_files, txt_files)
             if not result["valid"]:
                 self.status_var.set(self._tr("status_cache_invalid", msg=result['message']))
                 return
+        elif self.tf_encoder is None and continue_from is None:
+            # Beim Fortsetzen laedt der Worker den Encoder aus dem Checkpoint
+            # (inkl. VRAM/RAM-Fallback); sonst muss er hier geladen sein.
+            self.status_var.set(self._tr("status_no_encoder"))
+            return
         self.training_running = True
+        params["continue_from"] = continue_from
         self.tf_progress_bar.set(0)
         self.train_btn_tf_diffusion.configure(state="disabled")
         self.train_stop_btn.configure(state="normal")
-        mode = self._tr("with_cached_hs") if use_cached else self._tr("with_encoder")
-        self.status_var.set(self._tr("status_tf_training_started", mode=mode))
-        threading.Thread(target=self._tf_diffusion_training_worker, daemon=True).start()
+        if continue_from:
+            self.status_var.set(self._tr("status_training_continue", name=continue_from))
+        else:
+            mode = self._tr("with_cached_hs") if use_cached else self._tr("with_encoder")
+            self.status_var.set(self._tr("status_tf_training_started", mode=mode))
+        threading.Thread(target=self._tf_diffusion_training_worker, args=(params,), daemon=True).start()
 
     def _refresh_cache_list(self):
         """Refresh the cache selector dropdown with available caches."""
@@ -1344,34 +1842,69 @@ class MinecraftStructureApp(ctk.CTk):
         result = validate_cache(value, schem_files, txt_files)
         self.tf_cache_status_label.configure(text=result["message"])
 
-    def _tf_diffusion_training_worker(self):
+    def _tf_diffusion_training_worker(self, params: Dict[str, Any]):
         try:
-            epochs = int(self.train_epochs_entry.get())
-            batch_size = int(self.train_batch_entry.get())
-            lr = float(self.train_lr_entry.get())
-            num_timesteps = int(self.tf_diff_steps_entry.get())
-            grid_size = self._get_selected_grid_size()
-            aug_diversity = int(round(float(self.augmentation_diversity_var.get())))
-            allow_vertical = bool(self.setting_aug_vertical.get())
-            air_weight = float(self.air_weight_var.get()) if hasattr(self, 'air_weight_var') else 75.0
+            epochs = int(params["epochs"])
+            batch_size = int(params["batch_size"])
+            lr = float(params["lr"])
+            num_timesteps = int(params["num_timesteps"])
+            grid_size = tuple(params["grid_size"])
+            aug_diversity = int(params["augmentation_diversity"])
+            allow_vertical = bool(params["allow_vertical_movement"])
+            air_weight = float(params["air_weight"])
             device = torch.device("cuda" if torch.cuda.is_available() and self.config.gpu_enabled else "cpu")
-            config = self._tf_unet_config
-            use_cached = self.tf_use_cached_hs_var.get()
+            config = dict(self._tf_unet_config)
+            use_cached = bool(params["use_cached"])
+            # Batch halten statt verkleinern: der Plan teilt ihn dann in
+            # Mikro-Batches (siehe app/grad_accum.py).
+            allow_accum = bool(params.get("grad_accum", True))
+            cache_name = params.get("cache_name")
+            continue_from = params.get("continue_from")
 
             from dataset import MultiSourceSchematicDataset
             from app.hidden_state_cache import CACHE_DIR, cache_key, load_hidden_states_raw
 
+            # ── "Weiter trainieren": Architektur, Vokabular, Encoder und
+            # Zielordner kommen aus dem Checkpoint ──
+            continued = None
+            if continue_from:
+                continued = self._prepare_tf_diffusion_continue(
+                    continue_from, device, use_cached, cache_name)
+                grid_size = continued["grid_size"]
+                num_timesteps = continued["num_timesteps"]
+                config = {
+                    "channels": continued["channels"],
+                    "channel_multipliers": continued["channel_multipliers"],
+                    "d_model": continued["d_model"],
+                    "cross_attn_heads": continued["cross_attn_heads"],
+                }
+            vocab_kwargs: Dict[str, Any] = {}
+            if continued:
+                vocab_kwargs = {
+                    "prompt_tokenizer": continued["prompt_tokenizer"],
+                    "voxel_tokenizer": continued["voxel_tokenizer"],
+                }
+
             if use_cached:
-                # ── Use pre-computed hidden states ──
-                encoder_name = self.tf_cache_selector.get()
+                # Cache was selected in the main thread - do not touch Tk here
+                if not cache_name:
+                    raise RuntimeError("Kein Hidden-State-Cache ausgewaehlt")
+                encoder_name = cache_name
                 key = cache_key(encoder_name)
                 cache_dir = CACHE_DIR / key
 
                 # Load cache metadata to get encoder info
                 cache_data = load_hidden_states_raw(cache_dir)
                 cache_meta = cache_data["metadata"]
-                hs = cache_data["hidden_states"]  # [N, seq_len, hidden_dim]
-                context_dim = hs.shape[2]
+                hs = cache_data["hidden_states"]  # flat [total_tokens, hidden_dim]
+                # hidden_dim comes from the metadata - the flat cache has no
+                # per-prompt sequence axis anymore (rows are stored unpadded).
+                context_dim = int(cache_meta.get("hidden_dim") or hs.shape[-1])
+                if continued and context_dim != continued["context_dim"]:
+                    # Der Cache muss zum Encoder des Checkpoints passen, sonst
+                    # wuerde das Modell mit fremden Textmerkmalen weitertrainieren.
+                    raise RuntimeError(self._tr("tm_cache_dim_mismatch",
+                                                dim=context_dim, need=continued["context_dim"]))
 
                 # Build dataset with cache
                 dataset = MultiSourceSchematicDataset.with_cache(
@@ -1379,66 +1912,123 @@ class MinecraftStructureApp(ctk.CTk):
                     augmentation_diversity=aug_diversity,
                     allow_vertical_movement=allow_vertical,
                     air_weight_factor=air_weight,
+                    progress_callback=self._dataset_progress_callback(),
+                    **vocab_kwargs,
                 )
-                from torch.utils.data import DataLoader
-                loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
-                total_batches = len(loader)
+                self._report_dataset_ready(dataset)
 
-                model = TransformerDiffusionModel(
-                    num_blocks=len(dataset.voxel_tokenizer.id_to_block),
-                    grid_size=grid_size,
-                    d_model=config["d_model"],
+                # ── VRAM-Plan VOR dem Modellaufbau ──
+                # Dieser Pfad ist zuvor mit "Tried to allocate 34.55 GiB"
+                # abgebrochen: Grid 32^3 * 17.690 Blockzustaende * Batch 16
+                # ergibt einen Logits-Tensor von 34,55 GiB. Der Plan reduziert
+                # die Batch-Groesse und liefert die Chunk-Groesse, mit der die
+                # Logits stueckweise berechnet werden.
+                lengths = cache_data.get("lengths")
+                if lengths is not None and int(lengths.numel()) > 0:
+                    try:
+                        quantile = torch.quantile(lengths.to(torch.float32), 0.95)
+                        context_len = max(8, int(quantile))
+                    except RuntimeError:
+                        context_len = min(64, int(cache_meta.get("max_seq_len", 64) or 64))
+                else:
+                    context_len = min(64, int(cache_meta.get("max_seq_len", 64) or 64))
+                plan = plan_diffusion_training(
+                    grid_size, batch_size, len(dataset.voxel_tokenizer.id_to_block),
+                    device=device,
                     channels=config["channels"],
                     channel_multipliers=tuple(config["channel_multipliers"]),
-                    num_timesteps=num_timesteps,
-                    context_dim=context_dim,
+                    d_model=config["d_model"],
                     cross_attn_heads=config["cross_attn_heads"],
-                    context_proj_dim=config["d_model"] * 2,
-                ).to(device)
+                    context_dim=context_dim,
+                    context_len=context_len,
+                    allow_accumulation=allow_accum,
+                )
+                batch_size, chunk_voxels, micro_batch = self._apply_training_plan(plan, batch_size)
 
-                # Build encoder_config from cache metadata
-                encoder_config = {
-                    "display_name": cache_meta.get("encoder_name", encoder_name),
-                    "hf_id": cache_meta.get("encoder_hf_id", ""),
-                    "hidden_dim": context_dim,
-                }
+                from torch.utils.data import DataLoader
+                # collate_context_batch pads the unpadded cache rows per batch
+                loader = DataLoader(dataset, batch_size=batch_size, shuffle=True,
+                                    collate_fn=collate_context_batch)
+                total_batches = len(loader)
 
-                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                safe_enc_name = encoder_name.replace("/", "_").replace(" ", "_")
-                out_dir = Path("runs") / f"tf_diffusion_cached_{safe_enc_name}_{timestamp}"
+                model = self._build_tf_diffusion_model(
+                    config, grid_size, num_timesteps, context_dim,
+                    len(dataset.voxel_tokenizer.id_to_block), continued, device)
+
+                if continued:
+                    encoder_config = continued["encoder_config"]
+                    out_dir = RUNS_DIR / continue_from
+                else:
+                    # Build encoder_config from cache metadata
+                    encoder_config = {
+                        "display_name": cache_meta.get("encoder_name", encoder_name),
+                        "hf_id": cache_meta.get("encoder_hf_id", ""),
+                        "hidden_dim": context_dim,
+                    }
+
+                    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                    safe_enc_name = encoder_name.replace("/", "_").replace(" ", "_")
+                    out_dir = RUNS_DIR / f"tf_diffusion_cached_{safe_enc_name}_{timestamp}"
 
             else:
                 # ── Use live encoder ──
-                if self.tf_encoder is None:
-                    raise RuntimeError("Encoder not loaded")
-                context_dim = self.tf_encoder.hidden_dim
+                if continued:
+                    # _prepare_tf_diffusion_continue hat den Encoder des
+                    # Checkpoints geladen (VRAM oder System-RAM).
+                    context_dim = continued["context_dim"]
+                else:
+                    if self.tf_encoder is None:
+                        raise RuntimeError("Encoder not loaded")
+                    context_dim = self.tf_encoder.hidden_dim
 
                 dataset = MultiSourceSchematicDataset(
                     self.data_dirs, target_size=grid_size, max_voxels=400_000,
                     augmentation_diversity=aug_diversity,
                     allow_vertical_movement=allow_vertical,
                     air_weight_factor=air_weight,
+                    progress_callback=self._dataset_progress_callback(),
+                    **vocab_kwargs,
                 )
+                self._report_dataset_ready(dataset)
+
+                # VRAM-Plan (siehe gecachter Zweig). Die Textlaenge wird hier
+                # geschaetzt: der Encoder padet intern auf den laengsten Prompt
+                # des Batches; die Cache-Statistik (Median 14, Maximum 512
+                # Tokens) zeigt, dass ein Batch von 16 selten ueber 64 Tokens
+                # kommt. Der Posten geht nur in die Abschaetzung ein.
+                plan = plan_diffusion_training(
+                    grid_size, batch_size, len(dataset.voxel_tokenizer.id_to_block),
+                    device=device,
+                    channels=config["channels"],
+                    channel_multipliers=tuple(config["channel_multipliers"]),
+                    d_model=config["d_model"],
+                    cross_attn_heads=config["cross_attn_heads"],
+                    context_dim=context_dim,
+                    context_len=min(128, int(getattr(self.tf_encoder, "max_length", 128) or 128)),
+                    allow_accumulation=allow_accum,
+                )
+                batch_size, chunk_voxels, micro_batch = self._apply_training_plan(plan, batch_size)
+
                 from torch.utils.data import DataLoader
                 loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
                 total_batches = len(loader)
 
-                model = TransformerDiffusionModel(
-                    num_blocks=len(dataset.voxel_tokenizer.id_to_block),
-                    grid_size=grid_size,
-                    d_model=config["d_model"],
-                    channels=config["channels"],
-                    channel_multipliers=tuple(config["channel_multipliers"]),
-                    num_timesteps=num_timesteps,
-                    context_dim=context_dim,
-                    cross_attn_heads=config["cross_attn_heads"],
-                    context_proj_dim=config["d_model"] * 2,
-                ).to(device)
+                model = self._build_tf_diffusion_model(
+                    config, grid_size, num_timesteps, context_dim,
+                    len(dataset.voxel_tokenizer.id_to_block), continued, device)
 
-                encoder_config = self.tf_encoder.get_config()
-                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                encoder_name = self.tf_encoder.display_name.replace("/", "_").replace(" ", "_")
-                out_dir = Path("runs") / f"tf_diffusion_{encoder_name}_{timestamp}"
+                if continued:
+                    encoder_config = continued["encoder_config"]
+                    out_dir = RUNS_DIR / continue_from
+                else:
+                    encoder_config = self.tf_encoder.get_config()
+                    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                    encoder_name = self.tf_encoder.display_name.replace("/", "_").replace(" ", "_")
+                    out_dir = RUNS_DIR / f"tf_diffusion_{encoder_name}_{timestamp}"
+
+            # Fortsetzen schreibt in denselben Ordner; die Epochen werden auf
+            # die im Checkpoint gespeicherte Zahl addiert.
+            start_epoch = int(continued["start_epoch"]) if continued else 0
 
             out_dir.mkdir(parents=True, exist_ok=True)
             dataset.prompt_tokenizer.save(out_dir / "prompt_vocab.json")
@@ -1461,14 +2051,40 @@ class MinecraftStructureApp(ctk.CTk):
                         break
                     batch_num += 1
 
-                    if use_cached:
-                        # Use cached training step (no encoder needed)
-                        loss = train_transformer_diffusion_step_cached(model, batch, optimizer, device, noise_block_prob=noise_block_prob)
-                    else:
-                        # Use live encoder
-                        loss = train_transformer_diffusion_step(model, batch, self.tf_encoder, optimizer, device, noise_block_prob=noise_block_prob)
+                    # Gradient-Akkumulation: der DataLoader liefert den ganzen
+                    # (effektiven) Batch, gerechnet wird in Mikro-Batches, die in
+                    # den VRAM passen. Ohne Akkumulation ist das genau ein
+                    # Durchlauf - altes Verhalten, nur mit Gewicht 1.0. Als Anteil
+                    # zaehlt die Gewichtsmasse (Luft-Gewicht 75!): nur so sind die
+                    # Gradienten exakt die des grossen Batches.
+                    accumulating = micro_batch < batch_size
+                    masses = (per_sample_weight_mass(batch["voxel_ids"], batch)
+                              if accumulating else None)
+                    if accumulating:
+                        optimizer.zero_grad(set_to_none=True)
+                    batch_loss = 0.0
+                    for micro, scale in iter_micro_batches(batch, micro_batch,
+                                                            sample_mass=masses):
+                        if use_cached:
+                            # Use cached training step (no encoder needed)
+                            step_loss = train_transformer_diffusion_step_cached(
+                                model, micro, optimizer, device,
+                                noise_block_prob=noise_block_prob,
+                                chunk_voxels=chunk_voxels,
+                                accumulate=accumulating, grad_scale=scale)
+                        else:
+                            # Use live encoder
+                            step_loss = train_transformer_diffusion_step(
+                                model, micro, self.tf_encoder, optimizer, device,
+                                noise_block_prob=noise_block_prob,
+                                chunk_voxels=chunk_voxels,
+                                accumulate=accumulating, grad_scale=scale)
+                        batch_loss += step_loss * scale
+                    if accumulating:
+                        # Genau ein Schritt pro Batch (nicht pro Mikro-Batch).
+                        apply_optimizer_step(model, optimizer)
+                    total_loss += batch_loss
 
-                    total_loss += loss
                     if batch_num % max(1, total_batches // 10) == 0 or batch_num == total_batches:
                         self.after(0, lambda bp=batch_num/total_batches, bn=batch_num, tb=total_batches: (
                             self.tf_progress_bar.set(bp),
@@ -1476,12 +2092,15 @@ class MinecraftStructureApp(ctk.CTk):
                         ))
                 avg_loss = total_loss / max(total_batches, 1)
                 elapsed = time.time() - total_start
-                self.after(0, lambda e=epoch, l=avg_loss, p=epoch/epochs, el=elapsed: (
+                done_epoch = start_epoch + epoch
+                total_epoch = start_epoch + epochs
+                self.after(0, lambda e=done_epoch, tot=total_epoch, l=avg_loss,
+                                  p=done_epoch/total_epoch, el=elapsed: (
                     self.tf_progress_bar.set(p),
-                    self.tf_progress_label.configure(text=self._tr("tf_epoch_progress", e=e, epochs=epochs, loss=f"{l:.4f}")),
+                    self.tf_progress_label.configure(text=self._tr("tf_epoch_progress", e=e, epochs=tot, loss=f"{l:.4f}")),
                     self.tf_loss_var.set(self._tr("loss_time", loss=f"{l:.4f}", time=f"{el:.0f}")),
                     self.train_epoch_bar.set(p),
-                    self.train_epoch_label.configure(text=self._tr("tf_epoch_progress", e=e, epochs=epochs, loss=f"{l:.4f}")),
+                    self.train_epoch_label.configure(text=self._tr("tf_epoch_progress", e=e, epochs=tot, loss=f"{l:.4f}")),
                     self.train_loss_var.set(self._tr("tf_loss_time", loss=f"{l:.4f}", time=f"{el:.0f}")),
                 ))
                 torch.save({"model_state": model.state_dict(), "grid_size": grid_size,
@@ -1494,11 +2113,15 @@ class MinecraftStructureApp(ctk.CTk):
                             "encoder_config": encoder_config,
                             "augmentation_diversity": aug_diversity,
                             "allow_vertical_movement": allow_vertical,
-                            "epoch": epoch, "loss": avg_loss,
+                            "epoch": done_epoch, "loss": avg_loss,
                            }, out_dir / "model.pt")
             self.after(0, lambda: self.status_var.set(self._tr("status_tf_diffusion_done")))
             self.after(0, self._discover_models)
             self.after(0, self._refresh_models_tab)
+            if continue_from:
+                # Der fortgesetzte Checkpoint liegt im selben Ordner: neu laden,
+                # damit die Generierung direkt die trainierten Gewichte nutzt.
+                self.after(0, self._load_models_async)
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -1507,6 +2130,135 @@ class MinecraftStructureApp(ctk.CTk):
             self.training_running = False
             self.after(0, lambda: self.train_btn_tf_diffusion.configure(state="normal"))
             self.after(0, lambda: self.train_stop_btn.configure(state="disabled"))
+            # VRAM des Trainings zurueckgeben: der Caching-Allocator behaelt die
+            # Logits-/Gradienten-Bloecke sonst im eigenen Pool, mem_get_info()
+            # meldet sie als belegt und die Generierung plant zu klein bzw.
+            # scheitert mit "Cuda out of memory". Der verzoegerte Aufruf laeuft,
+            # nachdem dieser Frame (und damit die letzten Batch-Tensoren)
+            # abgebaut ist.
+            release_cuda_cache()
+            self.after(200, release_cuda_cache)
+
+    # ═══════════════════════════════════════════════════════════════
+    # TF-DIFFUSION: WEITER TRAINIEREN (CHECKPOINT FORTSETZEN)
+    # ═══════════════════════════════════════════════════════════════
+
+    def _prepare_tf_diffusion_continue(self, name: str, device, use_cached: bool,
+                                       cache_name: Optional[str]) -> Dict[str, Any]:
+        """Zustand fuer 'Weiter trainieren' eines TF-Diffusion-Modells sammeln.
+
+        Architektur, Vokabular, Encoder-Konfiguration und Zielordner kommen
+        komplett aus dem Checkpoint - nur so passen die Gewichte zum weiteren
+        Training. Ohne Cache wird der Encoder hier im Worker geladen
+        (VRAM/RAM-Fallback wie beim Laden ueber die GUI), mit Cache wird
+        geprueft, dass er zum Checkpoint passt.
+        """
+        entry = self.model_registry.get(name)
+        if entry is None or not entry.checkpoint_path.exists():
+            self._discover_models()
+            entry = self.model_registry.get(name)
+        if entry is None or not entry.checkpoint_path.exists():
+            raise RuntimeError(self._tr("tm_missing_checkpoint", name=name))
+        pt_path = entry.path / "prompt_vocab.json"
+        vt_path = entry.path / "block_vocab.json"
+        if not (pt_path.exists() and vt_path.exists()):
+            # Ohne das Vokabular des Checkpoints wuerden die Block-IDs nicht
+            # mehr passen - dann lieber sauber abbrechen.
+            raise RuntimeError(self._tr("tm_missing_vocab", name=name))
+
+        ckpt = torch.load(entry.checkpoint_path, map_location="cpu")
+        encoder_config = ckpt.get("encoder_config", {}) or {}
+        context_dim = int(ckpt.get("context_dim", DEFAULT_ENCODER_HIDDEN_DIM))
+        encoder_hint = str(encoder_config.get("display_name", "") or "")
+        if use_cached:
+            if not cache_name:
+                raise RuntimeError("Kein Hidden-State-Cache ausgewaehlt")
+            from app.hidden_state_cache import CACHE_DIR, cache_key, load_hidden_states_raw
+            cache_meta = load_hidden_states_raw(CACHE_DIR / cache_key(cache_name))["metadata"]
+            cache_dim = int(cache_meta.get("hidden_dim") or 0)
+            if cache_dim and cache_dim != context_dim:
+                raise RuntimeError(self._tr("tm_cache_dim_mismatch",
+                                            dim=cache_dim, need=context_dim))
+            cache_encoder = str(cache_meta.get("encoder_name", "") or "")
+            if encoder_hint and cache_encoder and cache_encoder != encoder_hint:
+                raise RuntimeError(self._tr("tm_cache_encoder_mismatch",
+                                            cache=cache_encoder, encoder=encoder_hint))
+        elif encoder_hint:
+            encoder = self._ensure_encoder_for_continue(encoder_hint)
+            if int(encoder.hidden_dim) != context_dim:
+                raise RuntimeError(self._tr("tm_encoder_dim_mismatch", name=encoder_hint,
+                                            dim=encoder.hidden_dim, need=context_dim))
+
+        loaded_d_model = int(ckpt.get("d_model", 64) or 64)
+        return {
+            "state_dict": ckpt["model_state"],
+            "grid_size": tuple(ckpt.get("grid_size", entry.grid_size)),
+            "num_timesteps": int(ckpt.get("num_timesteps", 50) or 50),
+            "channels": int(ckpt.get("channels", 32) or 32),
+            "channel_multipliers": tuple(ckpt.get("channel_multipliers", (1, 2, 2))),
+            "d_model": loaded_d_model,
+            "cross_attn_heads": int(ckpt.get("cross_attn_heads", 4) or 4),
+            "context_dim": context_dim,
+            "context_proj_dim": int(ckpt.get("context_proj_dim", loaded_d_model * 2)),
+            "num_blocks": int(ckpt.get("num_blocks", ckpt.get("block_vocab_size", 0))),
+            "encoder_config": encoder_config,
+            "prompt_tokenizer": PromptTokenizer.load(pt_path),
+            "voxel_tokenizer": VoxelTokenizer.load(vt_path),
+            "start_epoch": int(ckpt.get("epoch", 0) or 0),
+        }
+
+    def _ensure_encoder_for_continue(self, encoder_name: str) -> FrozenTransformerEncoder:
+        """Encoder fuer 'Weiter trainieren' laden (VRAM, sonst System-RAM).
+
+        Laeuft im Worker-Thread: der GUI-Loader ist zum Trainingsstart nicht
+        zwingend fertig, der Encoder muss aber zum Checkpoint passen. Der
+        Ausweichpfad in den RAM bleibt derselbe wie beim manuellen Laden.
+        """
+        if self.tf_encoder is not None and self.tf_encoder.display_name == encoder_name:
+            return self.tf_encoder
+        encoder = self._create_tf_encoder(encoder_name)
+        self.tf_encoder = encoder
+        location = "CPU" if encoder.device.type == "cpu" else "GPU"
+        hidden_dim = int(encoder.hidden_dim)
+
+        def _show_in_ui() -> None:
+            try:
+                self.tf_encoder_combo.set(encoder_name)
+            except Exception:  # Encoder nicht in der Liste: Anzeige belassen
+                pass
+            self.tf_encoder_status.configure(
+                text=self._tr("encoder_loaded_info", name=encoder_name,
+                              dim=hidden_dim, device=location))
+
+        self.after(0, _show_in_ui)
+        return encoder
+
+    def _build_tf_diffusion_model(self, config: Dict[str, Any], grid_size: tuple,
+                                  num_timesteps: int, context_dim: int, num_blocks: int,
+                                  continued: Optional[Dict[str, Any]], device):
+        """TF-Diffusion-Modell bauen - neu oder aus dem Checkpoint fortgesetzt.
+
+        ``continued`` ist der Zustand aus _prepare_tf_diffusion_continue; ist er
+        gesetzt, kommen Architektur und Gewichte aus dem Checkpoint (statt aus
+        dem UNet-Preset der GUI) und die Gewichte werden direkt geladen.
+        """
+        model = TransformerDiffusionModel(
+            num_blocks=int(continued["num_blocks"]) if continued else int(num_blocks),
+            grid_size=tuple(grid_size),
+            d_model=int(config["d_model"]),
+            channels=int(config["channels"]),
+            channel_multipliers=tuple(config["channel_multipliers"]),
+            num_timesteps=int(num_timesteps),
+            context_dim=int(context_dim),
+            cross_attn_heads=int(config["cross_attn_heads"]),
+            context_proj_dim=(int(continued["context_proj_dim"]) if continued
+                              else int(config["d_model"]) * 2),
+        ).to(device)
+        if continued:
+            # Hier wird aus "neu bauen" ein "weiter trainieren": der Checkpoint
+            # wird strikt geladen (Architektur muss exakt passen).
+            model.load_state_dict(continued.pop("state_dict"), strict=True)
+        return model
 
     # ═══════════════════════════════════════════════════════════════
     # PROJECTS TAB
@@ -1674,117 +2426,177 @@ class MinecraftStructureApp(ctk.CTk):
         self.model_status.configure(text=self._tr("status_loading_models"))
         threading.Thread(target=self._load_models, daemon=True).start()
 
-    def _load_models(self):
+    def _guard_model_load(self, label: str, errors: List[str], loader) -> bool:
+        """Run one model loader; a single failure must not break the others."""
         try:
-            device = torch.device("cuda" if torch.cuda.is_available() and self.config.gpu_enabled else "cpu")
-            tf_name = self.current_transformer_name or self.model_registry.default_transformer
-            df_name = self.current_diffusion_name or self.model_registry.default_diffusion
-            tf_diff_name = self.current_tf_diffusion_name or self.model_registry.default_tf_diffusion
-            self.model_registry.discover()
-            loaded_any = False
-            msg_parts = []
+            return bool(loader())
+        except Exception as exc:  # noqa: BLE001 - gui darf an einem kaputten Modell nicht sterben
+            logger.exception("Modell '%s' konnte nicht geladen werden", label)
+            errors.append(f"{label}: {exc}")
+            # Ein abgebrochener Aufbau (z.B. ein Encoder, der nicht in den VRAM
+            # passt) laesst sonst mehrere GB im Caching-Allocator zurueck.
+            release_cuda_cache()
+            return False
 
-            # ── Load TF Diffusion ──
-            if tf_diff_name:
-                entry = self.model_registry.get(tf_diff_name)
-                if entry and entry.checkpoint_path.exists():
-                    ckpt = torch.load(entry.checkpoint_path, map_location="cpu")
-                    if self.prompt_tokenizer is None:
-                        self.prompt_tokenizer = PromptTokenizer.load(entry.path / "prompt_vocab.json")
-                    if self.voxel_tokenizer is None:
-                        self.voxel_tokenizer = VoxelTokenizer.load(entry.path / "block_vocab.json")
-                    encoder_config = ckpt.get("encoder_config", {})
-                    encoder_name = encoder_config.get("display_name", "Phi-3.5-mini")
-                    enc_device = torch.device("cuda" if torch.cuda.is_available() and self.config.gpu_enabled else "cpu")
-                    enc_dtype = torch.float16 if enc_device.type == "cuda" else torch.float32
-                    if self.tf_encoder is None or self.tf_encoder.display_name != encoder_name:
-                        self.tf_encoder = FrozenTransformerEncoder(model_name=encoder_name, device=enc_device, dtype=enc_dtype)
-                    # Default context_proj_dim to d_model*2 to match training behavior
-                    _loaded_d_model = ckpt.get("d_model", 64)
-                    model = TransformerDiffusionModel(
-                        num_blocks=ckpt.get("num_blocks", ckpt.get("block_vocab_size", 0)),
-                        grid_size=tuple(ckpt.get("grid_size", (16, 16, 16))),
-                        d_model=_loaded_d_model, channels=ckpt.get("channels", 32),
-                        channel_multipliers=tuple(ckpt.get("channel_multipliers", (1, 2, 2))),
-                        num_timesteps=ckpt.get("num_timesteps", 50),
-                        context_dim=ckpt.get("context_dim", 768),
-                        cross_attn_heads=ckpt.get("cross_attn_heads", 4),
-                        context_proj_dim=ckpt.get("context_proj_dim", _loaded_d_model * 2),
-                    ).to(device)
-                    model.load_state_dict(ckpt["model_state"], strict=True)
-                    model.eval()
-                    self.tf_diffusion_model = model
-                    self.current_tf_diffusion_name = tf_diff_name
-                    loaded_any = True
-                    msg_parts.append(f"TF-Diffusion ({tf_diff_name})")
+    def _load_tf_diffusion_entry(self, tf_diff_name: str, device) -> bool:
+        """Load a TF-Diffusion checkpoint (raises on failure)."""
+        entry = self.model_registry.get(tf_diff_name)
+        if entry is None or not entry.checkpoint_path.exists():
+            return False
+        ckpt = torch.load(entry.checkpoint_path, map_location="cpu")
+        if self.prompt_tokenizer is None:
+            self.prompt_tokenizer = PromptTokenizer.load(entry.path / "prompt_vocab.json")
+        if self.voxel_tokenizer is None:
+            self.voxel_tokenizer = VoxelTokenizer.load(entry.path / "block_vocab.json")
+        encoder_config = ckpt.get("encoder_config", {})
+        encoder_name = encoder_config.get("display_name", "Phi-3.5-mini")
+        if self.tf_encoder is None or self.tf_encoder.display_name != encoder_name:
+            # Laedt auf die GPU - oder nach Rueckfrage in den System-RAM, wenn
+            # der Encoder nicht in den VRAM passt (siehe _create_tf_encoder).
+            self.tf_encoder = self._create_tf_encoder(encoder_name)
+        # Default context_proj_dim to d_model*2 to match training behavior
+        loaded_d_model = ckpt.get("d_model", 64)
+        model = TransformerDiffusionModel(
+            num_blocks=ckpt.get("num_blocks", ckpt.get("block_vocab_size", 0)),
+            grid_size=tuple(ckpt.get("grid_size", (16, 16, 16))),
+            d_model=loaded_d_model, channels=ckpt.get("channels", 32),
+            channel_multipliers=tuple(ckpt.get("channel_multipliers", (1, 2, 2))),
+            num_timesteps=ckpt.get("num_timesteps", 50),
+            context_dim=ckpt.get("context_dim", 768),
+            cross_attn_heads=ckpt.get("cross_attn_heads", 4),
+            context_proj_dim=ckpt.get("context_proj_dim", loaded_d_model * 2),
+        ).to(device)
+        model.load_state_dict(ckpt["model_state"], strict=True)
+        model.eval()
+        self.tf_diffusion_model = model
+        self.current_tf_diffusion_name = tf_diff_name
+        return True
 
-            # ── Load Transformer ──
-            if tf_name:
-                entry = self.model_registry.get(tf_name)
-                if entry and entry.checkpoint_path.exists():
-                    ckpt = torch.load(entry.checkpoint_path, map_location="cpu")
-                    pt = PromptTokenizer.load(entry.path / "prompt_vocab.json")
-                    vt = VoxelTokenizer.load(entry.path / "block_vocab.json")
-                    self.prompt_tokenizer = pt
-                    self.voxel_tokenizer = vt
-                    model = SharedWeightVoxelTransformer(
-                        text_vocab_size=ckpt["text_vocab_size"],
-                        block_vocab_size=ckpt["block_vocab_size"],
-                        grid_size=tuple(ckpt["grid_size"]), d_model=ckpt["d_model"],
-                        nhead=ckpt.get("nhead", 6), num_layers=ckpt["layers"],
-                        dim_feedforward=ckpt.get("dim_feedforward", 768), dropout=0.0,
-                    ).to(device)
-                    model.load_state_dict(ckpt["model_state"])
-                    model.eval()
-                    self.transformer_model = model
-                    self.current_transformer_name = tf_name
-                    loaded_any = True
-                    msg_parts.append(f"Transformer ({tf_name})")
 
-            # ── Load Diffusion ──
-            if df_name:
-                entry = self.model_registry.get(df_name)
-                if entry and entry.checkpoint_path.exists():
-                    ckpt = torch.load(entry.checkpoint_path, map_location="cpu")
-                    if self.prompt_tokenizer is None:
-                        self.prompt_tokenizer = PromptTokenizer.load(entry.path / "prompt_vocab.json")
-                    if self.voxel_tokenizer is None:
-                        self.voxel_tokenizer = VoxelTokenizer.load(entry.path / "block_vocab.json")
-                    ms = ckpt["model_state"]
-                    actual_num_blocks = ms["block_embed.embed.weight"].shape[0]
-                    actual_text_vocab = ms["text_cond.embed.weight"].shape[0]
-                    actual_d_text = ms["text_cond.embed.weight"].shape[1]
-                    actual_d_model = ms["time_embed.0.weight"].shape[1]
-                    actual_channels = ms["block_embed.embed.weight"].shape[1]
-                    actual_ch_mult = []
-                    encoder_idx = 0
-                    while f"encoder.{encoder_idx}.res.conv1.weight" in ms:
-                        out_ch = ms[f"encoder.{encoder_idx}.res.conv1.weight"].shape[0]
-                        mult = out_ch // actual_channels
-                        actual_ch_mult.append(mult)
-                        encoder_idx += 1
-                    if not actual_ch_mult:
-                        actual_ch_mult = ckpt.get("channel_multipliers", (1, 2, 2))
-                    model = VoxelDiffusionModel(
-                        num_blocks=actual_num_blocks, text_vocab_size=actual_text_vocab,
-                        grid_size=tuple(ckpt.get("grid_size", (16, 16, 16))),
-                        d_model=actual_d_model, d_text=actual_d_text, channels=actual_channels,
-                        channel_multipliers=tuple(actual_ch_mult),
-                        num_timesteps=ckpt.get("num_timesteps", 50),
-                    ).to(device)
-                    model.load_state_dict(ckpt["model_state"], strict=True)
-                    model.eval()
-                    self.diffusion_model = model
-                    self.current_diffusion_name = df_name
-                    loaded_any = True
-                    msg_parts.append(f"Diffusion ({df_name})")
+    def _load_transformer_entry(self, tf_name: str, device) -> bool:
+        """Load a SharedWeightVoxelTransformer checkpoint (raises on failure)."""
+        entry = self.model_registry.get(tf_name)
+        if entry is None or not entry.checkpoint_path.exists():
+            return False
+        ckpt = torch.load(entry.checkpoint_path, map_location="cpu")
+        prompt_tokenizer = PromptTokenizer.load(entry.path / "prompt_vocab.json")
+        voxel_tokenizer = VoxelTokenizer.load(entry.path / "block_vocab.json")
+        model = SharedWeightVoxelTransformer(
+            text_vocab_size=ckpt["text_vocab_size"],
+            block_vocab_size=ckpt["block_vocab_size"],
+            grid_size=tuple(ckpt["grid_size"]), d_model=ckpt["d_model"],
+            nhead=ckpt.get("nhead", 6), num_layers=ckpt["layers"],
+            dim_feedforward=ckpt.get("dim_feedforward", 768), dropout=0.0,
+        ).to(device)
+        model.load_state_dict(ckpt["model_state"])
+        model.eval()
+        self.prompt_tokenizer = prompt_tokenizer
+        self.voxel_tokenizer = voxel_tokenizer
+        self.transformer_model = model
+        self.current_transformer_name = tf_name
+        return True
 
-            status = " | ".join(msg_parts) if loaded_any else self._tr("status_no_model")
-        except Exception as e:
-            status = self._tr("gen_error", error=str(e)[:60])
-            self.transformer_model = None
-            self.diffusion_model = None
-            self.tf_diffusion_model = None
+    def _load_diffusion_entry(self, df_name: str, device) -> bool:
+        """Load a VoxelDiffusionModel checkpoint (raises on failure)."""
+        entry = self.model_registry.get(df_name)
+        if entry is None or not entry.checkpoint_path.exists():
+            return False
+        ckpt = torch.load(entry.checkpoint_path, map_location="cpu")
+        if self.prompt_tokenizer is None:
+            self.prompt_tokenizer = PromptTokenizer.load(entry.path / "prompt_vocab.json")
+        if self.voxel_tokenizer is None:
+            self.voxel_tokenizer = VoxelTokenizer.load(entry.path / "block_vocab.json")
+        ms = ckpt["model_state"]
+        actual_num_blocks = ms["block_embed.embed.weight"].shape[0]
+        actual_text_vocab = ms["text_cond.embed.weight"].shape[0]
+        actual_d_text = ms["text_cond.embed.weight"].shape[1]
+        actual_d_model = ms["time_embed.0.weight"].shape[1]
+        actual_channels = ms["block_embed.embed.weight"].shape[1]
+        actual_ch_mult = []
+        encoder_idx = 0
+        while f"encoder.{encoder_idx}.res.conv1.weight" in ms:
+            out_ch = ms[f"encoder.{encoder_idx}.res.conv1.weight"].shape[0]
+            actual_ch_mult.append(out_ch // actual_channels)
+            encoder_idx += 1
+        if not actual_ch_mult:
+            actual_ch_mult = ckpt.get("channel_multipliers", (1, 2, 2))
+        model = VoxelDiffusionModel(
+            num_blocks=actual_num_blocks, text_vocab_size=actual_text_vocab,
+            grid_size=tuple(ckpt.get("grid_size", (16, 16, 16))),
+            d_model=actual_d_model, d_text=actual_d_text, channels=actual_channels,
+            channel_multipliers=tuple(actual_ch_mult),
+            num_timesteps=ckpt.get("num_timesteps", 50),
+        ).to(device)
+        model.load_state_dict(ckpt["model_state"], strict=True)
+        model.eval()
+        self.diffusion_model = model
+        self.current_diffusion_name = df_name
+        return True
+
+    def _load_continue_checkpoint(self, model_type: str, name: str, device) -> bool:
+        """Checkpoint fuer 'Weiter trainieren' im Worker-Thread laden.
+
+        Gilt fuer Transformer und Diffusion; TF-Diffusion sammelt seinen
+        Checkpoint-Zustand in _prepare_tf_diffusion_continue ein (dort kommen
+        auch Vokabular, Encoder und Zielordner dazu).
+
+        Der Model-Manager uebergibt nur den Namen. Das Laden passiert bewusst
+        hier und nicht ueber den asynchronen GUI-Loader: sonst haengt es vom
+        Zufall ab, ob der Trainingsstart schon die Gewichte des angeklickten
+        Modells sieht (bisher wurde dadurch ein neues Modell trainiert).
+        """
+        entry = self.model_registry.get(name)
+        if entry is None or not entry.checkpoint_path.exists():
+            self._discover_models()
+            entry = self.model_registry.get(name)
+        if entry is None or not entry.checkpoint_path.exists():
+            return False
+        if model_type == "transformer":
+            if self.transformer_model is not None and self.current_transformer_name == name:
+                return True
+            return self._load_transformer_entry(name, device)
+        if model_type == "diffusion":
+            if self.diffusion_model is not None and self.current_diffusion_name == name:
+                return True
+            return self._load_diffusion_entry(name, device)
+        return False
+
+    def _load_models(self):
+        """Load the selected/default checkpoints (each one isolated).
+
+        A broken checkpoint no longer discards the models that loaded fine and
+        every failure is logged with a traceback.
+        """
+        device = torch.device("cuda" if torch.cuda.is_available() and self.config.gpu_enabled else "cpu")
+        # Vor dem Laden aufraeumen: der Trainer/Encoder kann Speicher hinterlassen
+        # haben, den `mem_get_info` sonst als belegt meldet.
+        release_cuda_cache()
+        tf_name = self.current_transformer_name or self.model_registry.default_transformer
+        df_name = self.current_diffusion_name or self.model_registry.default_diffusion
+        tf_diff_name = self.current_tf_diffusion_name or self.model_registry.default_tf_diffusion
+        self.model_registry.discover()
+        msg_parts: List[str] = []
+        errors: List[str] = []
+
+        if tf_diff_name and self._guard_model_load(
+            f"TF-Diffusion ({tf_diff_name})", errors,
+            lambda: self._load_tf_diffusion_entry(tf_diff_name, device),
+        ):
+            msg_parts.append(f"TF-Diffusion ({tf_diff_name})")
+        if tf_name and self._guard_model_load(
+            f"Transformer ({tf_name})", errors,
+            lambda: self._load_transformer_entry(tf_name, device),
+        ):
+            msg_parts.append(f"Transformer ({tf_name})")
+        if df_name and self._guard_model_load(
+            f"Diffusion ({df_name})", errors,
+            lambda: self._load_diffusion_entry(df_name, device),
+        ):
+            msg_parts.append(f"Diffusion ({df_name})")
+
+        status = " | ".join(msg_parts) if msg_parts else self._tr("status_no_model")
+        if errors:
+            status = f"{status} | {self._tr('status_model_errors')}: {', '.join(errors)[:120]}"
         self.after(0, lambda s=status: self.model_status.configure(text=s))
 
     # ═══════════════════════════════════════════════════════════════
@@ -1804,41 +2616,109 @@ class MinecraftStructureApp(ctk.CTk):
         if not prompt:
             self.status_var.set(self._tr("status_enter_prompt"))
             return
+        # UI-Werte hier im Main-Thread lesen (Tk ist nicht thread-safe) und an
+        # den Worker übergeben.
+        settings = {
+            "temperature": float(self.temp_slider.get()),
+            "top_k": int(self.topk_slider.get()),
+            "diffusion_steps": int(self.diff_steps_slider.get()),
+        }
         self.generation_running = True
         self.generate_btn.configure(state="disabled", text=self._tr("btn_generating"))
         self.progress_bar.start()
         self.status_var.set(self._tr("status_generating"))
-        threading.Thread(target=self._generate_worker, args=(prompt,), daemon=True).start()
+        threading.Thread(target=self._generate_worker, args=(prompt, settings), daemon=True).start()
 
-    def _generate_worker(self, prompt: str):
+    def _plan_generation(self, device) -> Tuple[Optional[int], str]:
+        """Logits-Chunk fuer die Generierung bestimmen (app/training_memory.py).
+
+        Die Generierung rechnete die Logits bisher am Stueck: bei Grid 32^3 und
+        17.690 Blockzustaenden sind das 2,16 GiB pro Kopie und mit Temperatur-,
+        Top-K-, Softmax- und Permute-Kopie kurzzeitig ~8,6 GiB - auf einer
+        6-GB-Karte endet das nach einem Trainingslauf in "Cuda out of memory".
+        Rueckgabe: (chunk_voxels oder None, Meldung fuer die Statuszeile).
+        """
+        language = getattr(self.config, "language", "en") or "en"
+        if self.model_type == "transformer" and self.transformer_model is not None:
+            model = self.transformer_model
+            grid_size = tuple(int(v) for v in model.grid_size)
+            layers = len(model.decoder.layers)
+            first = model.decoder.layers[0]
+            attn, rest = transformer_generation_bytes(
+                grid_size, 1, model.block_vocab_size, model.d_model,
+                first.self_attn.num_heads, layers, first.linear1.out_features)
+            plan = plan_generation(grid_size, model.block_vocab_size, device=device,
+                                   activation_bytes=attn + rest)
+        elif self.model_type == "diffusion" and self.diffusion_model is not None:
+            model = self.diffusion_model
+            grid_size = tuple(int(v) for v in model.grid_size)
+            activation = unet_inference_bytes(
+                1, model.channels, tuple(model.channel_multipliers), grid_size)
+            plan = plan_generation(grid_size, model.num_blocks, device=device,
+                                   activation_bytes=activation)
+        elif (self.model_type == "transformer_diffusion"
+              and self.tf_diffusion_model is not None):
+            model = self.tf_diffusion_model
+            grid_size = tuple(int(v) for v in model.grid_size)
+            activation = unet_inference_bytes(
+                1, model.channels, tuple(model.channel_multipliers), grid_size,
+                model.cross_attn_heads, GENERATION_CONTEXT_TOKENS)
+            plan = plan_generation(grid_size, model.num_blocks, device=device,
+                                   activation_bytes=activation)
+        else:
+            return None, ""
+
+        message = describe_generation_plan(plan, language)
+        if not plan.fits:
+            self.after(0, lambda m=message: self.status_var.set(m))
+            raise RuntimeError(self._tr(
+                "gen_error_vram",
+                need=format_gib(plan.estimated_bytes),
+                free=format_gib(plan.budget_bytes)))
+        return (plan.chunk_voxels if plan.chunked else None), message
+
+    def _generate_worker(self, prompt: str, settings: Dict[str, Any]):
         try:
             device = torch.device("cuda" if torch.cuda.is_available() and self.config.gpu_enabled else "cpu")
-            temp = self.temp_slider.get()
-            topk = int(self.topk_slider.get())
+            temp = float(settings["temperature"])
+            topk = int(settings["top_k"])
+            diff_steps = int(settings["diffusion_steps"])
+            # Bloecke aus Training/Modellaufbau freigeben, BEVOR der freie
+            # Speicher gemessen wird - sonst plant der Chunk zu klein.
+            release_cuda_cache()
+            chunk_voxels, plan_message = self._plan_generation(device)
+            if plan_message:
+                self.after(0, lambda m=plan_message: self.status_var.set(m))
             info = ""
             if self.model_type == "transformer" and self.transformer_model is not None:
                 prompt_ids = self.prompt_tokenizer.encode(prompt).unsqueeze(0).to(device)
-                grid = self.transformer_model.generate(prompt_ids, temperature=temp, top_k=topk)[0].cpu()
+                grid = self.transformer_model.generate(
+                    prompt_ids, temperature=temp, top_k=topk,
+                    chunk_voxels=chunk_voxels)[0].cpu()
                 self.id_to_block = self.voxel_tokenizer.id_to_block
                 gs = grid.shape
                 info = self._tr("gen_transformer_done", x=gs[0], y=gs[1], z=gs[2], temp=f"{temp:.2f}", topk=topk, prompt=prompt[:60])
             elif self.model_type == "diffusion" and self.diffusion_model is not None:
-                num_steps = int(self.diff_steps_slider.get())
+                num_steps = clamp_num_steps(diff_steps, self.diffusion_model.num_timesteps)
                 prompt_ids = self.prompt_tokenizer.encode(prompt).unsqueeze(0).to(device)
-                grid = self.diffusion_model.sample(prompt_ids, num_steps=num_steps, temperature=temp)[0].cpu()
+                grid = self.diffusion_model.sample(
+                    prompt_ids, num_steps=num_steps, temperature=temp,
+                    chunk_voxels=chunk_voxels)[0].cpu()
                 self.id_to_block = self.voxel_tokenizer.id_to_block
                 gs = grid.shape
                 info = self._tr("gen_diffusion_done", x=gs[0], y=gs[1], z=gs[2], temp=f"{temp:.2f}", steps=num_steps, prompt=prompt[:60])
             elif self.model_type == "transformer_diffusion" and self.tf_diffusion_model is not None and self.tf_encoder is not None:
-                num_steps = int(self.diff_steps_slider.get())
+                num_steps = clamp_num_steps(diff_steps, self.tf_diffusion_model.num_timesteps)
                 with torch.no_grad():
                     encoded = self.tf_encoder([prompt])
                     # Cast to model's dtype to avoid Half/Float mismatch
                     model_dtype = next(self.tf_diffusion_model.parameters()).dtype
                     context = encoded["last_hidden_state"].to(device=device, dtype=model_dtype)
                     context_mask = encoded["attention_mask"].to(device=device)
-                grid = self.tf_diffusion_model.sample(context, context_mask, num_steps=num_steps,
-                                                      temperature=temp, top_k=topk)[0].cpu()
+                grid = self.tf_diffusion_model.sample(
+                    context, context_mask, num_steps=num_steps,
+                    temperature=temp, top_k=topk,
+                    chunk_voxels=chunk_voxels)[0].cpu()
                 self.id_to_block = self.voxel_tokenizer.id_to_block
                 gs = grid.shape
                 info = self._tr("gen_tf_diffusion_done", x=gs[0], y=gs[1], z=gs[2], temp=f"{temp:.2f}", topk=topk, steps=num_steps, encoder=self.tf_encoder.display_name, prompt=prompt[:60])
@@ -1875,14 +2755,20 @@ class MinecraftStructureApp(ctk.CTk):
         self.generation_running = False
         self._update_preview()
         self.current_project_path = None
+        # Chunk-Puffer des Samplings zurueckgeben, damit der naechste Lauf (und
+        # die Planung) wieder den vollen freien Speicher sieht.
+        release_cuda_cache()
 
     def _generation_failed(self, error: str):
         self.progress_bar.stop()
         self.progress_bar.set(0)
         self.generate_btn.configure(state="normal", text=self._tr("btn_generate"))
+        if "out of memory" in str(error).lower():
+            error = f"{error}{self._tr('gen_oom_hint')}"
         self.info_var.set(self._tr("gen_error", error=error))
         self.status_var.set(self._tr("gen_error", error=error))
         self.generation_running = False
+        release_cuda_cache()
 
     def _open_3d_viewer(self):
         if self.generated_np is None or self.id_to_block is None:
@@ -1905,42 +2791,111 @@ class MinecraftStructureApp(ctk.CTk):
     # 3D PREVIEW
     # ═══════════════════════════════════════════════════════════════
 
-    def _update_preview(self):
+    def _preview_scene(self) -> Optional[VoxelScene]:
+        """Build (and cache) the render scene for the current grid.
+
+        Identity checks are used on purpose: the cache is dropped as soon as a
+        new generated grid or block palette is assigned, and holding a reference
+        to the old array keeps its id from being reused.
+        """
         if self.generated_np is None or self.id_to_block is None:
+            return None
+        if (self._preview_scene_cache is None
+                or self._preview_scene_source is not self.generated_np
+                or self._preview_scene_palette is not self.id_to_block):
+            self._preview_scene_source = self.generated_np
+            self._preview_scene_palette = self.id_to_block
+            self._preview_scene_cache = VoxelScene.build(self.generated_np, self.id_to_block)
+        return self._preview_scene_cache
+
+    def _preview_angles(self) -> tuple:
+        """Camera angles for the currently selected view mode."""
+        return view_angles(self.current_view, self.azimuth, self.elevation)
+
+    def _update_preview(self, interactive: bool = False):
+        """Request a preview frame (never blocks; the worker thread draws it).
+
+        interactive=True renders at a reduced resolution, which is what the drag
+        and zoom handlers use: the frame appears immediately and a full quality
+        frame follows once the interaction stops.
+        """
+        scene = self._preview_scene()
+        if scene is None:
             return
-        img = render_preview(self.generated_np, self.id_to_block, view=self.current_view,
-                             size=(420, 380), azimuth=self.azimuth, elevation=self.elevation, scale=self.zoom_scale)
-        img_tk = ctk.CTkImage(light_image=img, dark_image=img, size=img.size)
-        self.current_preview_img = img_tk
-        self.preview_label.configure(image=img_tk, text="")
+        factor = PREVIEW_DRAG_RESOLUTION if interactive else 1.0
+        width, height = PREVIEW_SIZE
+        azimuth, elevation = self._preview_angles()
+        self.preview_renderer.request(
+            scene,
+            size=(max(1, int(width * factor)), max(1, int(height * factor))),
+            azimuth=azimuth,
+            elevation=elevation,
+            scale=self.zoom_scale * factor,
+        )
+        self._schedule_preview_poll()
+
+    def _schedule_preview_poll(self):
+        if self._preview_poll_job is None:
+            self._preview_poll_job = self.after(PREVIEW_POLL_MS, self._poll_preview)
+
+    def _poll_preview(self):
+        """Collect finished frames and swap them into the preview label."""
+        self._preview_poll_job = None
+        image = self.preview_renderer.take_latest()
+        if image is not None:
+            img_tk = ctk.CTkImage(light_image=image, dark_image=image, size=PREVIEW_SIZE)
+            self.current_preview_img = img_tk
+            self.preview_label.configure(image=img_tk, text="")
+        if self.preview_renderer.is_busy():
+            self._schedule_preview_poll()
+
+    def _request_preview_refresh(self):
+        """Render a full quality frame shortly after the last interaction."""
+        if self._preview_refresh_job is not None:
+            self.after_cancel(self._preview_refresh_job)
+        self._preview_refresh_job = self.after(
+            PREVIEW_REFRESH_MS, self._preview_refresh_now)
+
+    def _preview_refresh_now(self):
+        self._preview_refresh_job = None
+        if not self._dragging:
+            self._update_preview()
 
     def _on_mouse_down(self, event):
         self._drag_start_x = event.x
+        self._drag_start_y = event.y
         self._orbit_start_az = self.azimuth
+        self._orbit_start_el = self.elevation
         self._dragging = True
 
     def _on_mouse_drag(self, event):
         if not self._dragging:
             return
         dx = event.x - self._drag_start_x
+        dy = event.y - self._drag_start_y
         self.azimuth = (self._orbit_start_az - dx * 0.5) % 360
-        self.elevation = 30.0
+        # Vertical dragging was computed but discarded before; keep the camera
+        # above the horizon and let the user tilt the view.
+        self.elevation = max(5.0, min(89.0, self._orbit_start_el + dy * 0.4))
         self.current_view = "free"
-        self._update_preview()
+        self._update_preview(interactive=True)
 
     def _on_mouse_up(self, event):
         self._dragging = False
+        self._update_preview()
 
     def _on_mouse_wheel(self, event):
         delta = event.delta / 120
         self.zoom_scale = max(1.5, min(6.0, self.zoom_scale + delta * 0.3))
         self.zoom_slider.set(self.zoom_scale)
-        self._update_preview()
+        self._update_preview(interactive=True)
+        self._request_preview_refresh()
 
     def _update_zoom(self, value: float):
         self.zoom_scale = value
         if self.generated_np is not None and self.id_to_block is not None:
-            self._update_preview()
+            self._update_preview(interactive=True)
+            self._request_preview_refresh()
 
     def _set_horizontal_orbit(self, az: float):
         self.azimuth = az
@@ -1980,7 +2935,7 @@ class MinecraftStructureApp(ctk.CTk):
         safe = "".join(c if c.isalnum() or c in " _-" else "_" for c in prompt)[:30]
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         path = EXPORTS_DIR / f"{safe}_{timestamp}.schem"
-        save_schem(path, self.generated_grid, self.id_to_block, swap_directions=True)
+        save_schem(path, self.generated_grid, self.id_to_block)
         self.status_var.set(self._tr("status_exported", path=path))
 
     def _refresh_projects(self):
@@ -2101,20 +3056,12 @@ class MinecraftStructureApp(ctk.CTk):
     # ═══════════════════════════════════════════════════════════════
 
     def _get_training_schem_files(self) -> Tuple[List[Path], List[Path]]:
-        """Get all .schem and .txt files from training data directories."""
-        schem_files = []
-        txt_files = []
-        for data_dir_str in self.data_dirs:
-            data_dir = Path(data_dir_str)
-            if not data_dir.exists():
-                continue
-            for f in sorted(data_dir.iterdir()):
-                if f.suffix.lower() == ".schem":
-                    txt_path = f.with_suffix(".txt")
-                    if txt_path.exists():
-                        schem_files.append(f)
-                        txt_files.append(txt_path)
-        return schem_files, txt_files
+        """All (schem, txt) pairs of the configured data dirs that have prompts.
+
+        Uses dataset.discover_prompt_files so the hidden state cache sees exactly
+        the same structures as the training dataset (recursive, nested data sets).
+        """
+        return discover_prompt_files(self.data_dirs)
 
     def _on_cached_hs_toggle(self):
         """Called when the cached hidden states switch is toggled."""
@@ -2187,8 +3134,7 @@ class MinecraftStructureApp(ctk.CTk):
     # ═══════════════════════════════════════════════════════════════
 
     def _get_selected_grid_size(self) -> tuple[int, int, int]:
-        gs = self.grid_size_var.get()
-        return GRID_SIZE_MAP.get(gs, (16, 16, 16))
+        return grid_size_for_label(self.grid_size_var.get())
 
     def _get_suggested_arch(self) -> Optional[dict]:
         grid_size = self._get_selected_grid_size()
@@ -2260,16 +3206,145 @@ class MinecraftStructureApp(ctk.CTk):
     # TRAINING
     # ═══════════════════════════════════════════════════════════════
 
-    def _start_training(self, model_type: str):
+    def _read_int_entry(self, widget, default: int) -> int:
+        """Read an integer from an entry widget (main thread only)."""
+        try:
+            text = str(widget.get()).strip()
+        except (TypeError, ValueError, AttributeError):
+            return default
+        try:
+            return int(text)
+        except ValueError:
+            return default
+
+    def _collect_training_params(self) -> Dict[str, Any]:
+        """Read the shared training parameters - main thread only.
+
+        Tk widgets/variables must never be touched from a worker thread (Tcl is
+        not thread safe), so all values are snapshotted here and passed down.
+        """
+        try:
+            epochs = int(str(self.train_epochs_entry.get()).strip())
+        except (TypeError, ValueError):
+            epochs = 10
+        try:
+            batch_size = int(str(self.train_batch_entry.get()).strip())
+        except (TypeError, ValueError):
+            batch_size = 4
+        try:
+            lr = float(str(self.train_lr_entry.get()).strip())
+        except (TypeError, ValueError):
+            lr = 1.5e-3
+        air_weight = 75.0
+        if hasattr(self, "air_weight_var"):
+            try:
+                air_weight = float(self.air_weight_var.get())
+            except (TypeError, ValueError):
+                air_weight = 75.0
+        grad_accum = accumulation_enabled()
+        if hasattr(self, "setting_grad_accum"):
+            try:
+                grad_accum = bool(self.setting_grad_accum.get())
+            except (TypeError, ValueError):
+                grad_accum = accumulation_enabled()
+        return {
+            "epochs": max(1, epochs),
+            "batch_size": max(1, batch_size),
+            "lr": max(1e-6, lr),
+            "air_weight": air_weight,
+            "grad_accum": grad_accum,
+        }
+
+    def _dataset_progress_callback(self):
+        """Rückmeldung aus dem Dataset-Aufbau in die Statuszeile (Thread -> Tk).
+
+        Der Aufbau dekodiert jede Struktur einmal; bei mehreren tausend
+        Strukturen dauert das Minuten. Ohne Rückmeldung sieht das aus wie ein
+        haengendes Training.
+        """
+        state = {"last": 0.0}
+
+        def report(done: int, total: int) -> None:
+            now = time.time()
+            if done < total and now - state["last"] < 0.4:
+                return
+            state["last"] = now
+            self.after(0, lambda d=done, t=total: self.status_var.set(
+                self._tr("status_dataset_progress", done=d, total=t)))
+
+        return report
+
+    def _report_dataset_ready(self, dataset) -> None:
+        try:
+            count = len(dataset)
+            skipped = len(getattr(dataset, "skipped_examples", []) or [])
+        except TypeError:
+            return
+        self.after(0, lambda c=count, s=skipped: self.status_var.set(
+            self._tr("status_dataset_ready", count=c, skipped=s)))
+
+    def _apply_training_plan(self, plan, requested_batch: int) -> tuple[int, int | None, int]:
+        """VRAM-Plan anwenden: Batch, Logits-Chunk und Mikro-Batch zurueckgeben.
+
+        Der Plan (app/training_memory.py) rechnet aus, ob Logits, Aktivierungen
+        und Optimizer in den freien VRAM passen. Passt der Wunsch-Batch nicht,
+        wird er verkleinert statt mit "Cuda out of memory" abzubrechen; passt
+        selbst Batch 1 nicht, gibt es eine klare Fehlermeldung samt Vorschlag.
+
+        Mit Gradient-Akkumulation (``plan.accumulated``) bleibt die *effektive*
+        Batch-Groesse erhalten - die Schleifen teilen den Batch dann in
+        ``plan.accum_steps`` Mikro-Batches. Rueckgabe daher:
+        ``(batch_size, chunk_voxels, micro_batch_size)`` - ``chunk_voxels``
+        ``None`` bedeutet ungechunkt, ``batch_size`` ist die Groesse des
+        DataLoader-Batches (= Beispiele pro Optimizer-Schritt).
+        """
+        language = getattr(self.config, "language", "en") or "en"
+        message = describe_training_plan(plan, language)
+        if not plan.fits:
+            self.after(0, lambda m=message: self.status_var.set(m))
+            raise RuntimeError(self._tr(
+                "training_error_vram",
+                need=format_gib(plan.estimated_bytes),
+                free=format_gib(plan.budget_bytes)))
+        if plan.accumulated:
+            message += " - " + self._tr(
+                "grad_accum_status", batch=plan.effective_batch_size,
+                steps=plan.accum_steps, micro=plan.micro_batch_size)
+        self.after(0, lambda m=message: self.status_var.set(m))
+        chunk = plan.chunk_voxels if plan.chunked else None
+        return plan.effective_batch_size, chunk, plan.micro_batch_size
+
+    def _start_training(self, model_type: str, grid_size: Optional[Tuple[int, int, int]] = None,
+                        overrides: Optional[Dict[str, Any]] = None,
+                        continue_from: Optional[str] = None):
+        """Training fuer 'transformer' oder 'diffusion' starten.
+
+        ``grid_size``/``overrides``/``continue_from`` kommen aus dem
+        Model-Manager ("Weiter trainieren"): dort bestimmt der Checkpoint Grid
+        und Zielwerte, die Worker bleiben dieselben.
+        """
         if self.training_running:
+            return
+        if model_type not in ("transformer", "diffusion"):
+            # TF-Diffusion laeuft ueber _start_tf_diffusion_training; jeder
+            # andere Typ wuerde im Worker stumm nichts tun.
+            self.status_var.set(self._tr("status_unknown_train_type", type=model_type))
             return
         arch = getattr(self, '_selected_arch', None)
         if arch is None:
             self._on_size_slider(self.size_slider_var.get())
             arch = self._selected_arch
-        grid_size = self._get_selected_grid_size()
+        grid_size = tuple(grid_size) if grid_size else self._get_selected_grid_size()
         augmentation_diversity = int(round(float(self.augmentation_diversity_var.get())))
         allow_vertical_movement = bool(self.setting_aug_vertical.get())
+        params = self._collect_training_params()
+        params["diffusion_steps"] = self._read_int_entry(
+            getattr(self, "diff_train_steps_entry", None), 50)
+        if overrides:
+            params.update(overrides)
+            augmentation_diversity = int(params["augmentation_diversity"])
+            allow_vertical_movement = bool(params["allow_vertical_movement"])
+        params["continue_from"] = continue_from
         gs_label = f"{grid_size[0]}x{grid_size[1]}x{grid_size[2]}"
         self.training_running = True
         self.train_epoch_bar.set(0)
@@ -2281,38 +3356,69 @@ class MinecraftStructureApp(ctk.CTk):
         self.train_stop_btn.configure(state="normal")
         self._current_training_type = model_type
         threading.Thread(target=self._training_worker,
-                         args=(model_type, grid_size, augmentation_diversity, allow_vertical_movement),
+                         args=(model_type, grid_size, augmentation_diversity,
+                               allow_vertical_movement, params),
                          daemon=True).start()
 
     def _training_worker(self, model_type: str, grid_size: tuple[int, int, int],
-                         augmentation_diversity: int, allow_vertical_movement: bool):
+                         augmentation_diversity: int, allow_vertical_movement: bool,
+                         params: Dict[str, Any]):
         try:
-            epochs = int(self.train_epochs_entry.get())
-            batch_size = int(self.train_batch_entry.get())
-            lr = float(self.train_lr_entry.get())
+            epochs = int(params["epochs"])
+            batch_size = int(params["batch_size"])
+            lr = float(params["lr"])
+            air_weight = float(params["air_weight"])
             device = torch.device("cuda" if torch.cuda.is_available() and self.config.gpu_enabled else "cpu")
             arch = getattr(self, '_selected_arch', None)
-            continuing_model = False
+            continue_from = params.get("continue_from")
+            # Batch halten statt verkleinern (Gradient-Akkumulation, siehe
+            # app/grad_accum.py) - der Schalter im Training-Tab entscheidet.
+            allow_accum = bool(params.get("grad_accum", True))
             continuing_name = None
-            if model_type == "transformer" and self.transformer_model is not None and self.current_transformer_name:
-                continuing_model = tuple(self.transformer_model.grid_size) == grid_size
+            if continue_from:
+                # "Weiter trainieren" aus dem Model-Manager: genau diesen
+                # Checkpoint laden und dessen Grid uebernehmen (das Grid im
+                # Training-Tab ist dabei nur Anzeige).
+                if not self._load_continue_checkpoint(model_type, continue_from, device):
+                    raise RuntimeError(self._tr("tm_missing_checkpoint", name=continue_from))
+                loaded = (self.transformer_model if model_type == "transformer"
+                          else self.diffusion_model)
+                continuing_name = continue_from
+                grid_size = tuple(loaded.grid_size)
+                self.after(0, lambda n=continue_from: self.status_var.set(
+                    self._tr("status_training_continue", name=n)))
+            elif (model_type == "transformer" and self.transformer_model is not None
+                  and self.current_transformer_name
+                  and tuple(self.transformer_model.grid_size) == grid_size):
                 continuing_name = self.current_transformer_name
-            elif model_type == "diffusion" and self.diffusion_model is not None and self.current_diffusion_name:
-                continuing_model = tuple(self.diffusion_model.grid_size) == grid_size
+            elif (model_type == "diffusion" and self.diffusion_model is not None
+                  and self.current_diffusion_name
+                  and tuple(self.diffusion_model.grid_size) == grid_size):
                 continuing_name = self.current_diffusion_name
+            continuing_model = continuing_name is not None
 
             orig_pt = None
             orig_vt = None
-            if continuing_model and continuing_name:
-                from dataset import PromptTokenizer, VoxelTokenizer
-                pt_path = Path("runs") / continuing_name / "prompt_vocab.json"
-                vt_path = Path("runs") / continuing_name / "block_vocab.json"
+            if continuing_model:
+                pt_path = RUNS_DIR / continuing_name / "prompt_vocab.json"
+                vt_path = RUNS_DIR / continuing_name / "block_vocab.json"
                 if vt_path.exists():
                     orig_vt = VoxelTokenizer.load(vt_path)
                 if pt_path.exists():
                     orig_pt = PromptTokenizer.load(pt_path)
+                if continue_from and (orig_pt is None or orig_vt is None):
+                    # Ohne das Vokabular des Checkpoints wuerden die Block-IDs
+                    # nicht mehr passen - dann lieber sauber abbrechen.
+                    raise RuntimeError(self._tr("tm_missing_vocab", name=continuing_name))
 
-            air_weight = float(self.air_weight_var.get()) if hasattr(self, 'air_weight_var') else 75.0
+            # Bereits trainierte Epochen (aus dem Model-Manager, ohne erneutes
+            # Lesen des Checkpoints): beim Fortsetzen kommen die neuen hinzu,
+            # die Anzeige zeigt danach die Gesamtzahl.
+            start_epoch = 0
+            if continuing_model:
+                entry = self.model_registry.get(continuing_name)
+                if entry is not None:
+                    start_epoch = max(0, int(entry.epochs_trained or 0))
 
             from dataset import MultiSourceSchematicDataset
             dataset = MultiSourceSchematicDataset(
@@ -2321,22 +3427,64 @@ class MinecraftStructureApp(ctk.CTk):
                 allow_vertical_movement=allow_vertical_movement,
                 prompt_tokenizer=orig_pt, voxel_tokenizer=orig_vt,
                 air_weight_factor=air_weight,
+                progress_callback=self._dataset_progress_callback(),
             )
+            self._report_dataset_ready(dataset)
+
+            # ── VRAM-Plan ──
+            # Der VoxelTransformer berechnet die Self-Attention ueber ALLE Voxel
+            # (Grid 32^3 -> 6 * 32768^2 * 4 Byte = 24 GiB pro Matrix und Layer,
+            # nicht chunkbar), das
+            # Diffusionsmodell erzeugt einen Logits-Tensor
+            # [Batch, Bloecke, Voxel] (34,55 GiB bei Grid 32^3, 17.690
+            # Blockzustaenden und Batch 16). Beides wird hier vor dem ersten
+            # Batch geprueft - inklusive Chunk-Groesse fuer die Logits.
+            num_blocks = len(dataset.voxel_tokenizer.id_to_block)
+            if model_type == "transformer":
+                if continuing_model:
+                    # Fortsetzen: die echte Architektur des Checkpoints, nicht
+                    # die (nur angezeigte) Zielgroesse aus dem Training-Tab.
+                    model = self.transformer_model
+                    plan_d_model = model.d_model
+                    plan_nhead = model.decoder.layers[0].self_attn.num_heads
+                    plan_layers = len(model.decoder.layers)
+                    plan_ff = model.decoder.layers[0].linear1.out_features
+                elif arch:
+                    plan_d_model = arch["d_model"]
+                    plan_nhead = arch["nhead"]
+                    plan_layers = arch["num_layers"]
+                    plan_ff = arch["dim_feedforward"]
+                else:
+                    plan_d_model, plan_nhead, plan_layers, plan_ff = 192, 6, 5, 768
+                plan = plan_transformer_training(
+                    grid_size, batch_size, num_blocks, device=device,
+                    d_model=plan_d_model, nhead=plan_nhead,
+                    num_layers=plan_layers, dim_feedforward=plan_ff,
+                    allow_accumulation=allow_accum,
+                )
+            else:
+                plan = plan_diffusion_training(
+                    grid_size, batch_size, num_blocks, device=device,
+                    channels=64, channel_multipliers=(1, 2, 2), d_model=128,
+                    cross_attn_heads=2, context_dim=64, context_len=64,
+                    allow_accumulation=allow_accum,
+                )
+            batch_size, chunk_voxels, micro_batch = self._apply_training_plan(plan, batch_size)
+
             from torch.utils.data import DataLoader
             loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
             total_batches = len(loader)
 
             if model_type == "transformer":
                 from model import SharedWeightVoxelTransformer
-                continuing = (self.transformer_model is not None and self.current_transformer_name
-                              and tuple(self.transformer_model.grid_size) == grid_size)
-                if continuing:
-                    out_dir = Path("runs") / self.current_transformer_name
+                if continuing_model:
+                    # Fortsetzen: derselbe Ordner, dieselben Gewichte/dasselbe Vokabular
+                    out_dir = RUNS_DIR / continuing_name
                 else:
                     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                    out_dir = Path("runs") / f"transformer_{timestamp}"
+                    out_dir = RUNS_DIR / f"transformer_{timestamp}"
                 out_dir.mkdir(parents=True, exist_ok=True)
-                if continuing:
+                if continuing_model:
                     model = self.transformer_model
                 else:
                     if arch:
@@ -2364,29 +3512,45 @@ class MinecraftStructureApp(ctk.CTk):
                         if not self.training_running:
                             break
                         batch_num += 1
-                        prompt_ids = batch["prompt_ids"].to(device)
-                        target = batch["voxel_ids"].to(device).reshape(prompt_ids.shape[0], -1)
-                        target = model.safe_clamp_target(target)
-                        logits = model(prompt_ids)
-                        target_flat = target.reshape(-1)
-                        sample_weight = batch["sample_weight"].to(device).view(-1, 1).expand_as(target).reshape(-1)
-                        per_block_w = batch["per_block_weight"].to(device).view(-1, 1).expand_as(target).reshape(-1)
-                        per_air_w = batch["per_air_weight"].to(device).view(-1, 1).expand_as(target).reshape(-1)
-                        weight_per_token = torch.where(target_flat == 0, per_air_w, per_block_w) * sample_weight
-                        logp = torch.log_softmax(logits.reshape(-1, logits.shape[-1]), dim=-1)
-                        nll = torch.nn.functional.nll_loss(logp, target_flat, reduction='none')
-                        loss = (nll * weight_per_token).sum() / weight_per_token.sum().clamp_min(1.0)
+                        # Gradient-Akkumulation: der Batch wird in Mikro-Batches
+                        # geteilt, zero_grad/step passieren einmal pro Batch. Als
+                        # Anteil zaehlt die Gewichtsmasse (nicht die Beispielzahl),
+                        # damit die Gradienten exakt die des grossen Batches sind.
+                        masses = (per_sample_weight_mass(batch["voxel_ids"], batch)
+                                  if micro_batch < batch_size else None)
                         optimizer.zero_grad(set_to_none=True)
-                        loss.backward()
-                        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                        optimizer.step()
-                        total_loss += float(loss.detach())
+                        batch_loss = 0.0
+                        for micro, share in iter_micro_batches(batch, micro_batch,
+                                                               sample_mass=masses):
+                            prompt_ids = micro["prompt_ids"].to(device)
+                            target = micro["voxel_ids"].to(device).reshape(prompt_ids.shape[0], -1)
+                            target = model.safe_clamp_target(target)
+                            logits = model(prompt_ids)
+                            target_flat = target.reshape(-1)
+                            sample_weight = micro["sample_weight"].to(device).view(-1, 1).expand_as(target).reshape(-1)
+                            per_block_w = micro["per_block_weight"].to(device).view(-1, 1).expand_as(target).reshape(-1)
+                            per_air_w = micro["per_air_weight"].to(device).view(-1, 1).expand_as(target).reshape(-1)
+                            weight_per_token = torch.where(target_flat == 0, per_air_w, per_block_w) * sample_weight
+                            logp = torch.log_softmax(logits.reshape(-1, logits.shape[-1]), dim=-1)
+                            nll = torch.nn.functional.nll_loss(logp, target_flat, reduction='none')
+                            loss = (nll * weight_per_token).sum() / weight_per_token.sum().clamp_min(1.0)
+                            # Der Anteil am Gesamt-Batch skaliert nur den Gradienten;
+                            # die angezeigte Kurve bleibt der Mittelwert.
+                            backward_loss = loss if share == 1.0 else loss * share
+                            backward_loss.backward()
+                            batch_loss += float(loss.detach()) * share
+                        apply_optimizer_step(model, optimizer)
+                        total_loss += batch_loss
                         if batch_num % max(1, total_batches // 10) == 0 or batch_num == total_batches:
                             self.after(0, lambda bp=batch_num/total_batches, bn=batch_num, tb=total_batches: (
                                 self.train_batch_bar.set(bp), self.train_batch_label.configure(text=self._tr("batch_progress", bn=bn, tb=tb))))
                     avg_loss = total_loss / max(total_batches, 1)
-                    self.after(0, lambda e=epoch, l=avg_loss, p=epoch/epochs: (
-                        self.train_epoch_bar.set(p), self.train_epoch_label.configure(text=self._tr("transformer_epoch_progress", e=e, epochs=epochs, loss=f"{l:.4f}"))))
+                    done_epoch = start_epoch + epoch
+                    total_epoch = start_epoch + epochs
+                    self.after(0, lambda e=done_epoch, tot=total_epoch, l=avg_loss,
+                                      p=done_epoch/total_epoch: (
+                        self.train_epoch_bar.set(p),
+                        self.train_epoch_label.configure(text=self._tr("transformer_epoch_progress", e=e, epochs=tot, loss=f"{l:.4f}"))))
                     torch.save({"model_state": model.state_dict(), "grid_size": grid_size,
                                 "text_vocab_size": len(dataset.prompt_tokenizer.token_to_id),
                                 "block_vocab_size": len(dataset.voxel_tokenizer.id_to_block),
@@ -2395,28 +3559,22 @@ class MinecraftStructureApp(ctk.CTk):
                                 "dim_feedforward": model.decoder.layers[0].linear1.out_features,
                                 "augmentation_diversity": augmentation_diversity,
                                 "allow_vertical_movement": allow_vertical_movement,
-                                "epoch": epoch, "loss": avg_loss}, out_dir / "model.pt")
+                                "epoch": done_epoch, "loss": avg_loss}, out_dir / "model.pt")
                 self.after(0, lambda: self.status_var.set(self._tr("status_transformer_done")))
 
             elif model_type == "diffusion":
-                continuing_diff = (self.diffusion_model is not None and self.current_diffusion_name
-                                   and tuple(self.diffusion_model.grid_size) == grid_size)
-                if continuing_diff:
-                    out_dir = Path("runs") / self.current_diffusion_name
+                if continuing_model:
+                    # Fortsetzen: derselbe Ordner, dieselben Gewichte/dasselbe Vokabular
+                    out_dir = RUNS_DIR / continuing_name
                 else:
                     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                    out_dir = Path("runs") / f"diffusion_{timestamp}"
+                    out_dir = RUNS_DIR / f"diffusion_{timestamp}"
                 out_dir.mkdir(parents=True, exist_ok=True)
-                if continuing_diff:
+                if continuing_model:
                     model = self.diffusion_model
                 else:
-                    # Read diffusion steps from the GUI entry (default 50)
-                    diff_num_timesteps = 50
-                    if hasattr(self, 'diff_train_steps_entry'):
-                        try:
-                            diff_num_timesteps = int(self.diff_train_steps_entry.get())
-                        except (ValueError, TypeError):
-                            diff_num_timesteps = 50
+                    # Diffusion steps for the new model (snapshotted in the main thread)
+                    diff_num_timesteps = int(params.get("diffusion_steps", 50))
                     model = VoxelDiffusionModel(
                         num_blocks=len(dataset.voxel_tokenizer.id_to_block),
                         text_vocab_size=len(dataset.prompt_tokenizer.token_to_id),
@@ -2439,14 +3597,36 @@ class MinecraftStructureApp(ctk.CTk):
                         if not self.training_running:
                             break
                         batch_num += 1
-                        loss = train_diffusion_step(model, batch, optimizer, device, noise_block_prob=noise_block_prob)
-                        total_loss += loss
+                        # Gradient-Akkumulation wie im TF-Diffusion-Worker: der
+                        # Batch wird in Mikro-Batches geteilt, der Optimizer
+                        # schreitet einmal pro Batch. Der Anteil kommt aus der
+                        # Gewichtsmasse (siehe app/grad_accum.py).
+                        accumulating = micro_batch < batch_size
+                        masses = (per_sample_weight_mass(batch["voxel_ids"], batch)
+                                  if accumulating else None)
+                        if accumulating:
+                            optimizer.zero_grad(set_to_none=True)
+                        batch_loss = 0.0
+                        for micro, share in iter_micro_batches(batch, micro_batch,
+                                                               sample_mass=masses):
+                            batch_loss += train_diffusion_step(
+                                model, micro, optimizer,
+                                device, noise_block_prob=noise_block_prob,
+                                chunk_voxels=chunk_voxels,
+                                accumulate=accumulating, grad_scale=share) * share
+                        if accumulating:
+                            apply_optimizer_step(model, optimizer)
+                        total_loss += batch_loss
                         if batch_num % max(1, total_batches // 10) == 0 or batch_num == total_batches:
                             self.after(0, lambda bp=batch_num/total_batches, bn=batch_num, tb=total_batches: (
                                 self.train_batch_bar.set(bp), self.train_batch_label.configure(text=self._tr("batch_progress", bn=bn, tb=tb))))
                     avg_loss = total_loss / max(total_batches, 1)
-                    self.after(0, lambda e=epoch, l=avg_loss, p=epoch/epochs: (
-                        self.train_epoch_bar.set(p), self.train_epoch_label.configure(text=self._tr("diffusion_epoch_progress", e=e, epochs=epochs, loss=f"{l:.4f}"))))
+                    done_epoch = start_epoch + epoch
+                    total_epoch = start_epoch + epochs
+                    self.after(0, lambda e=done_epoch, tot=total_epoch, l=avg_loss,
+                                      p=done_epoch/total_epoch: (
+                        self.train_epoch_bar.set(p),
+                        self.train_epoch_label.configure(text=self._tr("diffusion_epoch_progress", e=e, epochs=tot, loss=f"{l:.4f}"))))
                     torch.save({"model_state": model.state_dict(), "grid_size": model.grid_size,
                                 "text_vocab_size": len(dataset.prompt_tokenizer.token_to_id),
                                 "block_vocab_size": model.num_blocks, "num_blocks": model.num_blocks,
@@ -2455,7 +3635,7 @@ class MinecraftStructureApp(ctk.CTk):
                                 "num_timesteps": model.num_timesteps,
                                 "augmentation_diversity": augmentation_diversity,
                                 "allow_vertical_movement": allow_vertical_movement,
-                                "epoch": epoch, "loss": avg_loss}, out_dir / "model.pt")
+                                "epoch": done_epoch, "loss": avg_loss}, out_dir / "model.pt")
                 self.after(0, lambda: self.status_var.set(self._tr("status_diffusion_done")))
 
             self.after(0, self._discover_models)
@@ -2472,6 +3652,11 @@ class MinecraftStructureApp(ctk.CTk):
             self.after(0, lambda: self.train_btn_diffusion.configure(state="normal"))
             self.after(0, lambda: self.train_btn_tf_diffusion.configure(state="normal"))
             self.after(0, lambda: self.train_stop_btn.configure(state="disabled"))
+            # Siehe _tf_diffusion_training_worker: ohne das bleibt der VRAM-Peak
+            # des Trainings im Caching-Allocator reserviert und die Generierung
+            # meldet danach "Cuda out of memory".
+            release_cuda_cache()
+            self.after(200, release_cuda_cache)
 
     def _export_kaggle_dialog(self):
         from tkinter.messagebox import askyesno, showinfo
@@ -2489,61 +3674,53 @@ class MinecraftStructureApp(ctk.CTk):
             return
         self.status_var.set(self._tr("status_kaggle_creating"))
         self.kaggle_export_btn.configure(state="disabled")
-        threading.Thread(target=self._kaggle_export_worker, daemon=True).start()
+        # Snapshot every UI value here (main thread) and hand it to the worker.
+        params = self._collect_training_params()
+        params["grid_size"] = grid_size
+        params["augmentation_diversity"] = aug_diversity
+        params["allow_vertical_movement"] = allow_vertical
+        params["data_dirs"] = list(self.data_dirs)
+        params["model_type"] = {
+            "Transformer": "transformer",
+            "Diffusion": "diffusion",
+            "TF-Diffusion": "transformer_diffusion",
+        }.get(self.train_model_type_selector.get(), "transformer")
+        params["architecture"] = getattr(self, "_selected_arch", None)
+        params["tf_unet_config"] = getattr(self, "_tf_unet_config", None)
+        params["encoder"] = self._describe_selected_encoder()
+        threading.Thread(target=self._kaggle_export_worker, args=(params,), daemon=True).start()
 
-    def _kaggle_export_worker(self):
+    def _describe_selected_encoder(self) -> Optional[Tuple[str, int]]:
+        """(display_name, hidden_dim) of the encoder used for a TF-Diffusion export."""
+        if self.tf_encoder is not None:
+            return (self.tf_encoder.display_name, int(self.tf_encoder.hidden_dim))
+        try:
+            name = self.tf_encoder_combo.get()
+        except (TypeError, ValueError, AttributeError):
+            return None
+        if not name:
+            return None
+        return (name, ENCODER_HIDDEN_DIMS.get(name, DEFAULT_ENCODER_HIDDEN_DIM))
+
+    def _kaggle_export_worker(self, params: Dict[str, Any]):
         from tkinter.messagebox import showinfo, showerror
         try:
-            epochs = int(self.train_epochs_entry.get().strip())
-            batch_size = int(self.train_batch_entry.get().strip())
-            lr = float(self.train_lr_entry.get().strip())
-            aug_diversity = int(round(float(self.augmentation_diversity_var.get())))
-            allow_vertical = bool(self.setting_aug_vertical.get())
-            grid_size = self._get_selected_grid_size()
-            air_weight = float(self.air_weight_var.get()) if hasattr(self, 'air_weight_var') else 75.0
-            # Use the selected model type from the training tab
-            train_type = self.train_model_type_selector.get()
-            model_type = {"Transformer": "transformer", "Diffusion": "diffusion",
-                          "TF-Diffusion": "transformer_diffusion"}.get(train_type, "transformer")
-            # Get the selected architecture (for transformer) or UNet config (for TF-Diffusion)
-            arch = getattr(self, '_selected_arch', None)
-            if arch is None and model_type == "transformer":
-                self._on_size_slider(self.size_slider_var.get())
-                arch = getattr(self, '_selected_arch', None)
-            tf_unet_config = getattr(self, '_tf_unet_config', None)
-            # Get encoder info for TF-Diffusion Kaggle export
-            enc_name = None
-            ctx_dim = None
-            if model_type == "transformer_diffusion":
-                if self.tf_encoder is not None:
-                    enc_name = self.tf_encoder.display_name
-                    ctx_dim = self.tf_encoder.hidden_dim
-                else:
-                    enc_name = self.tf_encoder_combo.get()
-                    # Look up hidden_dim from the encoder registry
-                    from app.transformer_encoder import MODEL_TO_ID
-                    # Known hidden dims for supported encoders
-                    _ENCODER_HIDDEN_DIMS = {
-                        "Phi-3.5-mini": 3072,
-                        "Gemma-2-2B": 2304,
-                        "Gemma-2-9B": 3584,
-                        "Gemma-2-27B": 4608,
-                        "Gemma-3-1B": 768,
-                        "Gemma-3-4B": 2560,
-                        "Gemma-3-12B": 3840,
-                        "Gemma-3-27B": 5120,
-                        "Flan-T5-small": 512,
-                        "Flan-T5-base": 768,
-                        "Flan-T5-large": 1024,
-                        "Flan-T5-XL": 2048,
-                        "Flan-T5-XXL": 4096,
-                    }
-                    ctx_dim = _ENCODER_HIDDEN_DIMS.get(enc_name, 3072)  # Default to Phi-3.5-mini dim
+            epochs = int(params["epochs"])
+            batch_size = int(params["batch_size"])
+            lr = float(params["lr"])
+            aug_diversity = int(params["augmentation_diversity"])
+            allow_vertical = bool(params["allow_vertical_movement"])
+            grid_size = tuple(params["grid_size"])
+            air_weight = float(params["air_weight"])
+            model_type = str(params["model_type"])
+            arch = params.get("architecture")
+            tf_unet_config = params.get("tf_unet_config")
+            enc_name, ctx_dim = (params.get("encoder") or (None, None))
             from kaggle_export import create_kaggle_export
-            export_path = create_kaggle_export(output_dir="exports", epochs=epochs, batch_size=batch_size,
+            export_path = create_kaggle_export(output_dir=str(EXPORTS_DIR), epochs=epochs, batch_size=batch_size,
                                                learning_rate=lr, aug_diversity=aug_diversity,
                                                allow_vertical=allow_vertical, grid_size=grid_size,
-                                               model_type=model_type, data_dirs=self.data_dirs,
+                                               model_type=model_type, data_dirs=params.get("data_dirs"),
                                                architecture=arch, tf_unet_config=tf_unet_config,
                                                air_weight=air_weight,
                                                encoder_name=enc_name, context_dim=ctx_dim)
@@ -2568,6 +3745,11 @@ def prompt_text_from_txt(proj_dir: Path) -> str:
 
 
 def main():
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
     app = MinecraftStructureApp()
     app.mainloop()
 

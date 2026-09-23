@@ -10,17 +10,20 @@ Runs in its own process to avoid OpenGL thread/main-thread conflicts.
 from __future__ import annotations
 
 import math
+import json
 import os
 import subprocess
 import sys
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 from PIL import Image
 
-from app.voxel_preview import get_block_color
+from app.paths import PROJECT_ROOT, TMP_DIR
+from app.voxel_preview import get_block_color, is_air_block
 
 # Set BEFORE any pyglet import to avoid ARB_pixel_format error
 os.environ["PYGLET_WIN32_DISABLE_ARB_PIXEL_FORMAT"] = "1"
@@ -548,7 +551,7 @@ class VoxelViewer3D:
                     if bid < 0 or bid >= len(self.id_to_block):
                         continue
                     block_name = str(self.id_to_block[bid])
-                    if "air" in block_name.lower():
+                    if is_air_block(block_name):
                         continue
                     u0, v0, u1, v1 = self.atlas.get_uv(block_name)
                     # Check neighbors
@@ -559,8 +562,8 @@ class VoxelViewer3D:
                             neigh[(dx,dy,dz)] = True
                         else:
                             b = int(self.grid[nx, ny, nz])
-                            if b>=0 and b<len(self.id_to_block) and "air" in str(self.id_to_block[b]).lower():
-                                neigh[(dx,dy,dz)] = True
+                            if b >= 0 and b < len(self.id_to_block) and is_air_block(str(self.id_to_block[b])):
+                                neigh[(dx, dy, dz)] = True
                             else:
                                 neigh[(dx,dy,dz)] = False
                     face_keys = [(0,0,1),(0,0,-1),(1,0,0),(-1,0,0),(0,1,0),(0,-1,0)]
@@ -679,9 +682,63 @@ class VoxelViewer3D:
 
 def open_3d_viewer(grid: np.ndarray, id_to_block: List[str],
                    title: str = "Minecraft 3D Viewer") -> None:
-    """Open 3D viewer in a subprocess to avoid thread/OpenGL conflicts."""
+    """Open the 3D viewer in a separate process (keeps the Tk main loop alive).
+
+    pyglet runs its own event loop; starting it in-process froze the whole GUI
+    until the viewer window was closed.
+    """
     if not HAS_PYGLET:
         print("pyglet not available. Install with: pip install pyglet")
         return
-    viewer = VoxelViewer3D(grid, id_to_block, title)
-    viewer.start()
+    run_dir = TMP_DIR / "viewer"
+    try:
+        run_dir.mkdir(parents=True, exist_ok=True)
+        data_path = run_dir / f"grid_{uuid.uuid4().hex}.npz"
+        meta_path = run_dir / f"blocks_{uuid.uuid4().hex}.json"
+        np.savez(data_path, grid=np.asarray(grid))
+        meta_path.write_text(json.dumps([str(name) for name in id_to_block]), encoding="utf-8")
+    except OSError as exc:
+        print(f"Viewer konnte nicht gestartet werden ({exc})")
+        return
+
+    try:
+        subprocess.Popen(
+            [sys.executable, "-m", "app.voxel_viewer_3d", str(data_path), str(meta_path), title],
+            cwd=str(PROJECT_ROOT),
+        )
+    except OSError as exc:
+        print(f"Viewer konnte nicht gestartet werden ({exc})")
+        for path in (data_path, meta_path):
+            try:
+                path.unlink()
+            except OSError:
+                pass
+
+
+def _viewer_main(argv: List[str]) -> int:
+    """Entry point of the viewer subprocess."""
+    if len(argv) < 2:
+        print("Nutzung: python -m app.voxel_viewer_3d <grid.npz> <blocks.json> [Titel]")
+        return 2
+    data_path = Path(argv[0])
+    meta_path = Path(argv[1])
+    title = argv[2] if len(argv) > 2 else "Minecraft 3D Viewer"
+    try:
+        with np.load(data_path) as data:
+            grid = data["grid"]
+        id_to_block = [str(name) for name in json.loads(meta_path.read_text(encoding="utf-8"))]
+        VoxelViewer3D(grid, id_to_block, title).start()
+    except Exception as exc:  # noqa: BLE001 - Subprozess soll immer mit Meldung enden
+        print(f"3D-Viewer Fehler: {exc}")
+        return 1
+    finally:
+        for path in (data_path, meta_path):
+            try:
+                path.unlink()
+            except OSError:
+                pass
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_viewer_main(sys.argv[1:]))

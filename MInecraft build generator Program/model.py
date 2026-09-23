@@ -162,6 +162,10 @@ class VoxelTransformer(nn.Module):
 
     def forward(self, prompt_ids: torch.Tensor) -> torch.Tensor:
         """Single pass: encode prompt, decode all voxel positions at once."""
+        return self.output(self.decoded(prompt_ids))
+
+    def decoded(self, prompt_ids: torch.Tensor) -> torch.Tensor:
+        """Decoder output ``[batch, Voxel, d_model]`` (shared by forward/generate)."""
         batch = prompt_ids.shape[0]
         device = prompt_ids.device
 
@@ -174,9 +178,25 @@ class VoxelTransformer(nn.Module):
         target = self.block_embedding(token_ids) + self.position_embedding(positions)
         target = self.target_norm(target)
 
-        # Decode and project to block vocabulary
-        decoded = self.decoder(target, memory)
-        return self.output(decoded)
+        return self.decoder(target, memory)
+
+    def iter_output_chunks(self, prompt_ids: torch.Tensor,
+                           chunk_voxels: int | None = None):
+        """Logits haeppchenweise: ``(start, end, logits_chunk)``.
+
+        Der Ausgabekopf (LayerNorm + zwei Lineare Schichten) ist punktweise und
+        damit beliebig entlang der Voxelachse aufteilbar; ``chunk_voxels=None``
+        liefert genau einen Chunk (identisch zum ungechunkten ``forward()``).
+        Ungechunkt kostet er ``Voxel * block_vocab_size`` Werte - bei Grid 64^3
+        und 253 Bloecken sind das 265 MB, bei den 17.690 Blockzustaenden des
+        augmentierten Datensatzes 18,5 GiB.
+        """
+        decoded = self.decoded(prompt_ids)
+        voxels = self.num_voxels
+        step = voxels if not chunk_voxels else max(1, min(voxels, int(chunk_voxels)))
+        for start in range(0, voxels, step):
+            end = min(start + step, voxels)
+            yield start, end, self.output(decoded[:, start:end, :])
 
     @torch.no_grad()
     def generate(
@@ -184,23 +204,28 @@ class VoxelTransformer(nn.Module):
         prompt_ids: torch.Tensor,
         temperature: float = 0.9,
         top_k: int = 40,
+        chunk_voxels: int | None = None,
     ) -> torch.Tensor:
-        """Generate in a single pass."""
+        """Generate in a single pass; ``chunk_voxels`` limits the logits memory."""
         self.eval()
-        logits = self.forward(prompt_ids)
+        device = prompt_ids.device
         batch = prompt_ids.shape[0]
+        tokens = torch.empty((batch, self.num_voxels), dtype=torch.long, device=device)
 
-        effective_top_k = min(top_k, logits.shape[-1]) if top_k > 0 else 0
-        if temperature > 0:
-            logits = logits / temperature
-            if effective_top_k > 0:
-                top_k_vals, _ = torch.topk(logits, effective_top_k, dim=-1)
-                min_top_k = top_k_vals[..., -1, None]
-                logits[logits < min_top_k] = float('-inf')
-            probs = torch.softmax(logits, dim=-1)
-            tokens = torch.multinomial(probs.reshape(-1, probs.shape[-1]), 1).reshape(batch, -1)
-        else:
-            tokens = logits.argmax(dim=-1)
+        for start, end, logits in self.iter_output_chunks(prompt_ids, chunk_voxels):
+            effective_top_k = min(top_k, logits.shape[-1]) if top_k > 0 else 0
+            if temperature > 0:
+                logits = logits / temperature
+                if effective_top_k > 0:
+                    top_k_vals, _ = torch.topk(logits, effective_top_k, dim=-1)
+                    min_top_k = top_k_vals[..., -1, None]
+                    logits[logits < min_top_k] = float('-inf')
+                probs = torch.softmax(logits, dim=-1)
+                sampled = torch.multinomial(
+                    probs.reshape(-1, probs.shape[-1]), 1).reshape(batch, end - start)
+            else:
+                sampled = logits.argmax(dim=-1)
+            tokens[:, start:end] = sampled
 
         # IDs auf gültigen Bereich begrenzen (0 bis block_vocab_size-1)
         tokens = torch.clamp(tokens, 0, self.block_vocab_size - 1)

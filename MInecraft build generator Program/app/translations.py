@@ -37,6 +37,8 @@ TRANSLATIONS = {
     "status_no_cache": {"en": "Please select a cache", "de": "Bitte einen Cache auswaehlen"},
     "status_cache_invalid": {"en": "Cache not current: {msg}", "de": "Cache nicht aktuell: {msg}"},
     "status_cache_warning": {"en": "Cache not current: {msg}", "de": "Cache nicht aktuell: {msg}"},
+    "status_dataset_progress": {"en": "Loading training data: {done}/{total} examples...", "de": "Lade Trainingsdaten: {done}/{total} Beispiele..."},
+    "status_dataset_ready": {"en": "Training data ready: {count} examples ({skipped} skipped)", "de": "Trainingsdaten bereit: {count} Beispiele ({skipped} uebersprungen)"},
     "status_no_encoder_loaded": {"en": "Please load the Text Encoder first", "de": "Bitte zuerst den Text Encoder laden"},
     "status_no_training_data": {"en": "No training data found", "de": "Keine Trainingsdaten gefunden"},
     "status_computing_hs": {"en": "Computing Hidden States for {count} structures...", "de": "Berechne Hidden States fuer {count} Strukturen..."},
@@ -135,6 +137,9 @@ TRANSLATIONS = {
     "allow_vertical": {"en": "Allow upward movement", "de": "Nach oben bewegen erlauben"},
     "air_weight": {"en": "Air Weight (50-100):", "de": "Luft-Gewicht (50-100):"},
     "air_weight_hint": {"en": "We recommend keeping the default setting of 75.", "de": "Wir empfehlen die Standard-Einstellung von 75 beizubehalten."},
+    "grad_accum": {"en": "Keep batch size (gradient accumulation)", "de": "Batch-Groesse halten (Gradient Accumulation)"},
+    "grad_accum_hint": {"en": "If the VRAM is too small, the batch is split into micro-batches whose gradients are summed up: the effective batch size stays the same, only a bit slower.", "de": "Passt der Batch nicht in den VRAM, wird er in Mikro-Batches geteilt und die Gradienten aufsummiert: gleiche effektive Batch-Groesse, nur etwas langsamer."},
+    "grad_accum_status": {"en": "split: {steps} x {micro} samples per step ({batch} in total)", "de": "Aufteilung: {steps} x {micro} Beispiele pro Schritt ({batch} gesamt)"},
     "progress": {"en": "Progress:", "de": "Fortschritt:"},
     "btn_train_transformer": {"en": "Train Transformer", "de": "Transformer trainieren"},
     "btn_train_diffusion": {"en": "Train Diffusion", "de": "Diffusion trainieren"},
@@ -144,12 +149,28 @@ TRANSLATIONS = {
 
     # --- Train More dialog ---
     "train_more_title": {"en": "Train More: {name}", "de": "Weiter trainieren: {name}"},
-    "train_more_header": {"en": "Train More: {name}", "de": "Weiter trainieren: {name}"},
-    "params_label": {"en": "Parameters:", "de": "Parameter:"},
-    "gpu_available": {"en": "GPU: {'CUDA available' if avail else 'CPU only'}", "de": "GPU: {'CUDA verfuegbar' if avail else 'CPU only'}"},
+    "train_more_header": {"en": "Train More: [{icon}] {name}", "de": "Weiter trainieren: [{icon}] {name}"},
     "btn_start_training": {"en": "Start Training", "de": "Training starten"},
     "btn_cancel": {"en": "Cancel", "de": "Abbrechen"},
     "values_must_be_positive": {"en": "Values must be positive", "de": "Werte muessen positiv sein"},
+    "tm_cont_arch": {"en": "Type: {type}   |   Architecture and vocabulary come from the checkpoint", "de": "Typ: {type}   |   Architektur und Vokabular kommen aus dem Checkpoint"},
+    "tm_continue_info": {"en": "Continues '{name}': the new epochs are added to the existing checkpoint ({path}).", "de": "Setzt '{name}' fort: die neuen Epochen kommen zum bestehenden Checkpoint hinzu ({path})."},
+    "tm_epochs_total": {"en": "{done} epochs so far + {new} new = {total} epochs", "de": "{done} Epochen bisher + {new} neu = {total} Epochen"},
+    "tm_epochs_new": {"en": "{new} new epochs", "de": "{new} neue Epochen"},
+    "tm_air_weight": {"en": "Air Weight:", "de": "Luft-Gewicht:"},
+    "tm_encoder_used": {"en": "Encoder (from checkpoint): {name}", "de": "Encoder (aus Checkpoint): {name}"},
+    "tm_steps_fixed": {"en": "Diffusion steps (fixed): {steps}", "de": "Diffusions-Schritte (fix): {steps}"},
+    "tm_cache_dim": {"en": "Cache dimension: {dim}   |   checkpoint needs: {need}", "de": "Cache-Dimension: {dim}   |   Checkpoint braucht: {need}"},
+    "tm_cache_dim_mismatch": {"en": "Cache has hidden_dim={dim}, the checkpoint was trained with hidden_dim={need}", "de": "Cache hat hidden_dim={dim}, der Checkpoint wurde mit hidden_dim={need} trainiert"},
+    "tm_cache_encoder_mismatch": {"en": "Cache was computed with '{cache}', the checkpoint uses '{encoder}'", "de": "Cache wurde mit '{cache}' berechnet, der Checkpoint nutzt '{encoder}'"},
+    "tm_encoder_dim_mismatch": {"en": "Encoder {name} has hidden_dim={dim}, the checkpoint needs {need}", "de": "Encoder {name} hat hidden_dim={dim}, der Checkpoint braucht {need}"},
+    "tm_missing_checkpoint": {"en": "Checkpoint of {name} not found", "de": "Checkpoint von {name} nicht gefunden"},
+    "tm_missing_vocab": {"en": "Vocabulary of {name} is incomplete (prompt_vocab.json / block_vocab.json)", "de": "Vokabular von {name} ist unvollstaendig (prompt_vocab.json / block_vocab.json)"},
+    "tm_gpu_on": {"en": "GPU: CUDA available", "de": "GPU: CUDA verfuegbar"},
+    "tm_gpu_off": {"en": "GPU: CPU only", "de": "GPU: CPU only"},
+    "status_training_running": {"en": "Training is already running", "de": "Training laeuft bereits"},
+    "status_training_continue": {"en": "Continuing training of {name}...", "de": "Training von {name} wird fortgesetzt..."},
+    "status_unknown_train_type": {"en": "Unknown model type: {type}", "de": "Unbekannter Modell-Typ: {type}"},
 
     # --- Rename dialog ---
     "rename_title": {"en": "Rename Model", "de": "Modell umbenennen"},
@@ -200,6 +221,38 @@ TRANSLATIONS = {
     "gen_unsaved_blocks": {"en": "{count} blocks not in vocabulary: marked with ! in preview", "de": "{count} Bloecke nicht im Vokabular: in der Vorschau mit ! markiert"},
     "gen_trim": {"en": "Trim: {rx}x{ry}x{rz} -> {tx}x{ty}x{tz}", "de": "Trim: {rx}x{ry}x{rz} -> {tx}x{ty}x{tz}"},
     "gen_error": {"en": "Error: {error}", "de": "Fehler: {error}"},
+    "gen_error_vram": {
+        "en": "Error: not enough VRAM for generation - needs {need} GiB, usable {free} GiB. Details in the status bar.",
+        "de": "Fehler: VRAM zu klein fuer die Generierung - braucht {need} GiB, nutzbar {free} GiB. Details in der Statuszeile.",
+    },
+    "gen_oom_hint": {
+        "en": "\nVRAM is exhausted: close other GPU programs, train/generate with a smaller grid or model, or restart the app (the training keeps its peak memory reserved until it is released).",
+        "de": "\nDer VRAM ist voll: andere GPU-Programme schliessen, mit kleinerem Grid/Modell trainieren bzw. generieren oder die App neu starten (das Training haelt seinen Speicher-Peak bis zur Freigabe).",
+    },
+    "encoder_vram_error": {
+        "en": "{name} does not fit into the VRAM - TF-Diffusion generation needs a smaller text encoder (e.g. Flan-T5-small, Flan-T5-base or Gemma-3-1B) or a GPU with more memory.",
+        "de": "{name} passt nicht in den VRAM - fuer die TF-Diffusion-Generierung wird ein kleinerer Text-Encoder (z.B. Flan-T5-small, Flan-T5-base oder Gemma-3-1B) oder eine GPU mit mehr Speicher benoetigt.",
+    },
+    "encoder_cpu_title": {
+        "en": "Text encoder does not fit into the VRAM",
+        "de": "Text-Encoder passt nicht in den VRAM",
+    },
+    "encoder_cpu_question": {
+        "en": "{name} needs about {need} GiB of VRAM, but only {vram} GiB are free.\n\nLoad the encoder into system RAM instead?\nIt then runs on the CPU: generation works, but takes longer.\nFree RAM: {ram} GiB",
+        "de": "{name} braucht ca. {need} GiB VRAM, frei sind nur {vram} GiB.\n\nDen Encoder stattdessen in den System-RAM laden?\nEr rechnet dann auf der CPU: die Generierung funktioniert, dauert aber laenger.\nFreier RAM: {ram} GiB",
+    },
+    "encoder_cpu_ram_warning": {
+        "en": "\n\nWARNING: that is more than the free RAM - close other programs first or pick a smaller encoder.",
+        "de": "\n\nWARNUNG: das ist mehr als der freie RAM - vorher andere Programme schliessen oder einen kleineren Encoder waehlen.",
+    },
+    "encoder_ram_error": {
+        "en": "Not enough free RAM for {name} - close other programs or pick a smaller encoder.",
+        "de": "Zu wenig freier RAM fuer {name} - andere Programme schliessen oder einen kleineren Encoder waehlen.",
+    },
+    "status_encoder_cpu": {
+        "en": "Encoder {name} runs in system RAM (CPU) - slower, but needs no VRAM",
+        "de": "Encoder {name} laeuft im System-RAM (CPU) - langsamer, aber ohne VRAM-Bedarf",
+    },
     "gen_loaded": {"en": "Loaded: {name}\n{x}x{y}x{z}\n{prompt}", "de": "Geladen: {name}\n{x}x{y}x{z}\n{prompt}"},
 
     # --- Kaggle dialog ---
@@ -210,16 +263,14 @@ TRANSLATIONS = {
     "kaggle_failed_title": {"en": "Export failed", "de": "Export fehlgeschlagen"},
 
     # --- Misc ---
-    "unknown": {"en": "Unknown", "de": "Unbekannt"},
     "no_cache": {"en": "(no cache)", "de": "(kein Cache)"},
     "none": {"en": "(none)", "de": "(keine)"},
     "computing": {"en": "Computing...", "de": "Berechne..."},
     "cache_created": {"en": "Cache created ({count} structures)", "de": "Cache erstellt ({count} Strukturen)"},
     "cache_error": {"en": "Error: {msg}", "de": "Fehler: {msg}"},
     "encoder_not_loaded_yet": {"en": "{name} - not loaded yet", "de": "{name} - noch nicht geladen"},
-    "encoder_loaded_info": {"en": "{name} loaded (dim={dim}, frozen)", "de": "{name} geladen (dim={dim}, frozen)"},
+    "encoder_loaded_info": {"en": "{name} loaded (dim={dim}, {device}, frozen)", "de": "{name} geladen (dim={dim}, {device}, frozen)"},
     "batch_progress": {"en": "Batch {bn}/{tb}", "de": "Batch {bn}/{tb}"},
-    "epoch_progress": {"en": "Epoch {e}/{epochs}, Loss={loss}", "de": "Epoche {e}/{epochs}, Loss={loss}"},
     "tf_epoch_progress": {"en": "TF-Diffusion Epoch {e}/{epochs}, Loss={loss}", "de": "TF-Diffusion Epoche {e}/{epochs}, Loss={loss}"},
     "transformer_epoch_progress": {"en": "Transformer Epoch {e}/{epochs}, Loss={loss}", "de": "Transformer Epoche {e}/{epochs}, Loss={loss}"},
     "diffusion_epoch_progress": {"en": "Diffusion Epoch {e}/{epochs}, Loss={loss}", "de": "Diffusion Epoche {e}/{epochs}, Loss={loss}"},
@@ -227,6 +278,10 @@ TRANSLATIONS = {
     "tf_loss_time": {"en": "TF-Diffusion | Loss: {loss} | Time: {time}s", "de": "TF-Diffusion | Loss: {loss} | Zeit: {time}s"},
     "tf_error": {"en": "Error: {msg}", "de": "Fehler: {msg}"},
     "training_error": {"en": "Error: {msg}", "de": "Fehler: {msg}"},
+    "training_error_vram": {
+        "en": "Error: not enough VRAM - needs {need} GiB, usable {free} GiB. Details in the status bar.",
+        "de": "Fehler: VRAM zu klein - braucht {need} GiB, nutzbar {free} GiB. Details in der Statuszeile.",
+    },
     "with_cached_hs": {"en": "with Pre-Computed HS", "de": "mit Pre-Computed HS"},
     "with_encoder": {"en": "with Encoder", "de": "mit Encoder"},
 
@@ -245,15 +300,8 @@ TRANSLATIONS = {
     # --- About tab title ---
     "about_title": {"en": "{name} v{version}", "de": "{name} v{version}"},
 
-    # --- Additional status messages ---
-    "status_no_suitable_model": {"en": "No suitable model loaded", "de": "Kein passendes Modell geladen"},
-    "status_pyglet_not_installed": {"en": "pyglet not installed", "de": "pyglet nicht installiert"},
-    "status_delete_confirm_title": {"en": "Delete Model", "de": "Modell loeschen"},
-    "status_delete_confirm": {"en": "Really delete '{name}'?\n\n{path}", "de": "Wirklich '{name}' loeschen?\n\n{path}"},
-    "status_rename_title": {"en": "Rename Model", "de": "Modell umbenennen"},
-    "status_rename_prompt": {"en": "New name for '{old}':", "de": "Neuer Name fuer '{old}':"},
-    "status_rename_success": {"en": "{old} -> {new}", "de": "{old} -> {new}"},
-    "status_rename_failed": {"en": "Rename failed (does {name} exist?)", "de": "Umbenennen fehlgeschlagen (existiert {name}?)"},
+    # --- Model load errors ---
+    "status_model_errors": {"en": "Model errors", "de": "Modell-Fehler"},
 }
 
 

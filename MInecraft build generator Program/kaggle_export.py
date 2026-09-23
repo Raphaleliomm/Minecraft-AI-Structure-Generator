@@ -9,9 +9,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple
 
+from app.paths import EXPORTS_DIR, PROJECT_ROOT, default_data_dir_strings
+from app.transformer_encoder import MODEL_TO_ID as _ENCODER_HF_IDS
+from app.transformer_encoder import DEFAULT_ENCODER_HIDDEN_DIM
+
 
 def create_kaggle_export(
-    output_dir: str = "exports",
+    output_dir: Optional[str] = None,
     epochs: int = 30,
     batch_size: int = 4,
     learning_rate: float = 1.5e-3,
@@ -61,14 +65,12 @@ def create_kaggle_export(
         Path to the created export directory.
     """
     if data_dirs is None:
-        data_dirs = [
-            "Trainingsdaten good thoroughly analyzed",
-            "Trainingsdaten zu gross vorerst ausgelagert",
-        ]
+        data_dirs = default_data_dir_strings()
 
     gx, gy, gz = grid_size
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    export_dir = Path(output_dir) / f"kaggle_export_{timestamp}"
+    export_root = Path(output_dir) if output_dir else EXPORTS_DIR
+    export_dir = export_root / f"kaggle_export_{timestamp}"
     export_dir.mkdir(parents=True, exist_ok=True)
 
     # ─── 1. Copy source files ───
@@ -108,7 +110,7 @@ def create_kaggle_export(
 
 def _copy_source_files(export_dir: Path) -> None:
     """Copy train.py, model.py, dataset.py, requirements.txt, and app/ into the export dir."""
-    src_dir = Path(".")
+    src_dir = PROJECT_ROOT
 
     files_to_copy = [
         "train.py",
@@ -129,10 +131,19 @@ def _copy_source_files(export_dir: Path) -> None:
             )
 
     # Copy the app/ directory (needed for diffusion_model.py, transformer_encoder.py, etc.)
+    # __pycache__/.pyc are excluded: they would only bloat the upload (and may be
+    # bytecode of a different Python version).
     app_src = src_dir / "app"
     app_dst = export_dir / "app"
     if app_src.exists() and app_src.is_dir():
-        shutil.copytree(str(app_src), str(app_dst), dirs_exist_ok=True)
+        shutil.copytree(
+            str(app_src),
+            str(app_dst),
+            dirs_exist_ok=True,
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".pytest_cache"),
+        )
+    else:
+        print(f"  Warnung: app/ nicht gefunden ({app_src}) - Export bleibt unvollstaendig")
 
 
 def _package_training_data(export_dir: Path, data_dirs: List[str]) -> None:
@@ -191,7 +202,7 @@ def _create_notebook(
             channels, ch_mult, tf_d_model, ca_heads = 32, (1, 2, 2), 64, 4
         # Use provided encoder info or default to Phi-3.5
         enc_name = encoder_name or "Phi-3.5-mini"
-        ctx_dim = context_dim or 768
+        ctx_dim = context_dim or DEFAULT_ENCODER_HIDDEN_DIM
     else:
         d_model, nhead, num_layers, dim_ff = 192, 6, 5, 768
 
@@ -199,22 +210,18 @@ def _create_notebook(
     if model_type == "transformer":
         model_code = _build_transformer_model_code(d_model, nhead, num_layers, dim_ff)
         train_code = _build_transformer_train_code(air_weight)
-        save_code = _build_transformer_save_code(d_model, nhead, num_layers, dim_ff)
         model_desc = "Shared-Weight Voxel Transformer"
     elif model_type == "diffusion":
         model_code = _build_diffusion_model_code()
         train_code = _build_diffusion_train_code(air_weight)
-        save_code = _build_diffusion_save_code()
         model_desc = "3D Voxel Diffusion Model"
     elif model_type == "transformer_diffusion":
         model_code = _build_tf_diffusion_model_code(channels, ch_mult, tf_d_model, ca_heads, enc_name, ctx_dim)
         train_code = _build_tf_diffusion_train_code(air_weight, enc_name, ctx_dim)
-        save_code = _build_tf_diffusion_save_code(channels, ch_mult, tf_d_model, ca_heads)
         model_desc = "Transformer Diffusion Model"
     else:
         model_code = _build_transformer_model_code(192, 6, 5, 768)
         train_code = _build_transformer_train_code(air_weight)
-        save_code = _build_transformer_save_code(192, 6, 5, 768)
         model_desc = "Shared-Weight Voxel Transformer"
 
     notebook = {
@@ -423,10 +430,6 @@ def _build_transformer_train_code(air_weight):
     ).replace("{d_model}", str(d_model)).replace("{nhead}", str(nhead)).replace("{num_layers}", str(num_layers)).replace("{dim_ff}", str(dim_ff))
 
 
-def _build_transformer_save_code(d_model, nhead, num_layers, dim_ff):
-    return ""  # Save is handled in train code
-
-
 def _build_diffusion_model_code():
     return (
         "# Create model\n"
@@ -479,28 +482,7 @@ def _build_diffusion_train_code(air_weight):
     )
 
 
-def _build_diffusion_save_code():
-    return ""
-
-
-_ENCODER_HF_IDS = {
-    "Phi-3.5-mini": "microsoft/Phi-3.5-mini-instruct",
-    "Gemma-2-2B": "google/gemma-2-2b",
-    "Gemma-2-9B": "google/gemma-2-9b",
-    "Gemma-2-27B": "google/gemma-2-27b-it",
-    "Gemma-3-1B": "google/gemma-3-1b-it",
-    "Gemma-3-4B": "google/gemma-3-4b-it",
-    "Gemma-3-12B": "google/gemma-3-12b-it",
-    "Gemma-3-27B": "google/gemma-3-27b-it",
-    "Flan-T5-small": "google/flan-t5-small",
-    "Flan-T5-base": "google/flan-t5-base",
-    "Flan-T5-large": "google/flan-t5-large",
-    "Flan-T5-XL": "google/flan-t5-xl",
-    "Flan-T5-XXL": "google/flan-t5-xxl",
-}
-
-
-def _build_tf_diffusion_model_code(channels, ch_mult, d_model, ca_heads, encoder_name="Phi-3.5-mini", context_dim=768):
+def _build_tf_diffusion_model_code(channels, ch_mult, d_model, ca_heads, encoder_name="Phi-3.5-mini", context_dim=DEFAULT_ENCODER_HIDDEN_DIM):
     ch_mult_str = ", ".join(str(m) for m in ch_mult)
     hf_id = _ENCODER_HF_IDS.get(encoder_name, "microsoft/Phi-3.5-mini-instruct")
     is_t5 = "t5" in encoder_name.lower()
@@ -545,7 +527,7 @@ def _build_tf_diffusion_model_code(channels, ch_mult, d_model, ca_heads, encoder
     )
 
 
-def _build_tf_diffusion_train_code(air_weight, encoder_name="Phi-3.5-mini", context_dim=768):
+def _build_tf_diffusion_train_code(air_weight, encoder_name="Phi-3.5-mini", context_dim=DEFAULT_ENCODER_HIDDEN_DIM):
     is_t5 = "t5" in encoder_name.lower()
     if is_t5:
         context_extract = (
@@ -604,10 +586,6 @@ def _build_tf_diffusion_train_code(air_weight, encoder_name="Phi-3.5-mini", cont
         "        }, 'model.pt')\n"
         "        print(f'  -> new best model saved (loss={avg_loss:.4f})')"
     )
-
-
-def _build_tf_diffusion_save_code(channels, ch_mult, d_model, ca_heads):
-    return ""
 
 
 def _create_readme(
@@ -731,7 +709,7 @@ def _code_cell(code: str) -> dict:
 if __name__ == "__main__":
     # Quick test / preview
     path = create_kaggle_export(
-        output_dir="exports",
+        output_dir=str(EXPORTS_DIR),
         epochs=5,
         batch_size=4,
         learning_rate=1.5e-3,

@@ -12,9 +12,9 @@
   "temperature": 0.2,
   "top_k": 40,
   "diffusion_steps": 50,
-  "noise_block_prob": 0.20,
+  "noise_block_prob": 0.2,
   "export_directory": "exports",
   "projects_directory": "projects",
-  "language": "en",
+  "language": "de",
   "gpu_enabled": true
 }

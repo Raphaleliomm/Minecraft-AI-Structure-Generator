@@ -1,22 +1,49 @@
 """3D Voxel Preview - renders Minecraft structures with full orbit controls.
 Supports interactive rotation (azimuth/elevation), zoom, and multiple view modes.
-Uses real Minecraft block textures from Blocktextures/block/ for accurate colors."""
+Uses real Minecraft block textures from Blocktextures/block/ for accurate colors.
+
+Rendering is split in two stages so that orbiting stays interactive:
+
+* :class:`VoxelScene` pre-digests a block grid once (positions, colours,
+  neighbour occupancy). Building it is the only step that touches names/textures.
+* :func:`render_scene` draws such a scene for one camera angle using numpy for
+  all projection work and only visible *surface* faces (faces hidden by a solid
+  neighbour are skipped). Transparent blocks are alpha blended by PIL during
+  drawing (mode "RGBA" on an RGB image), so they need no extra pass.
+
+The rendered image is mode "RGB" (the backdrop is opaque).
+
+Interactive use should go through :class:`PreviewRenderer`, which renders on a
+worker thread and drops stale frames instead of queueing them up.
+"""
 from __future__ import annotations
 
+import hashlib
+import logging
 import math
 import os
+import threading
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
+from app.paths import TEXTURE_DIR
 
-# Path to Minecraft block textures
-TEXTURE_DIR = Path("Blocktextures") / "block"
+logger = logging.getLogger(__name__)
+
 
 # Cache for loaded textures: block_name -> (avg_r, avg_g, avg_b, avg_a)
 _TEXTURE_CACHE: Dict[str, Tuple[int, int, int, int]] = {}
+
+# Cache for resolved block colours: normalized block name -> RGBA
+_BLOCK_COLOR_CACHE: Dict[str, Tuple[int, int, int, int]] = {}
+
+# Names that are invisible. Compared exactly (after stripping namespace/states):
+# a substring check for "air" also matched every *_stairs block and made all
+# stairs disappear from the preview and the 3D viewer.
+AIR_BLOCK_NAMES = {"air", "cave_air", "void_air", "structure_void"}
 
 # Known texture file name overrides for common blocks
 _TEXTURE_MAP: Dict[str, str] = {
@@ -241,9 +268,41 @@ _TEXTURE_MAP: Dict[str, str] = {
 }
 
 
+# Runtime tints for greyscale textures (vanilla default biome colours).
+# Without them water and leaves - both stored as grey masks - rendered grey.
+_TEXTURE_TINTS: Dict[str, Tuple[int, int, int]] = {
+    "water_still.png": (63, 118, 228),
+    "water_flow.png": (63, 118, 228),
+    "water_overlay.png": (63, 118, 228),
+    "bubble_column.png": (63, 118, 228),
+    "grass_block_top.png": (145, 189, 89),
+    "tall_grass_top.png": (145, 189, 89),
+    "grass.png": (145, 189, 89),
+    "fern.png": (145, 189, 89),
+    "vine.png": (72, 181, 24),
+    "lily_pad.png": (32, 128, 48),
+    "oak_leaves.png": (72, 181, 24),
+    "jungle_leaves.png": (72, 181, 24),
+    "acacia_leaves.png": (72, 181, 24),
+    "dark_oak_leaves.png": (72, 181, 24),
+    "mangrove_leaves.png": (72, 181, 24),
+    "cherry_leaves.png": (72, 181, 24),
+    "azalea_leaves.png": (72, 181, 24),
+    "flowering_azalea_leaves.png": (72, 181, 24),
+    "birch_leaves.png": (128, 167, 85),
+    "spruce_leaves.png": (97, 153, 97),
+}
+
+
 def _load_texture_color(texture_name: str) -> Optional[Tuple[int, int, int, int]]:
     """Load a .png texture and return its average RGBA color.
-    Returns None if texture doesn't exist."""
+
+    Textures Minecraft tints at runtime (water, foliage) are stored as grey
+    masks; without the tint they would render as grey blocks instead of blue
+    water or green leaves. :data:`_TEXTURE_TINTS` applies the vanilla defaults.
+
+    Returns None if the texture doesn't exist.
+    """
     if texture_name is None:
         return None
     cache_key = texture_name
@@ -256,16 +315,26 @@ def _load_texture_color(texture_name: str) -> Optional[Tuple[int, int, int, int]
 
     try:
         img = Image.open(tex_path).convert("RGBA")
-        arr = np.array(img)
-        # Average color, weighted by alpha
-        if arr[:, :, 3].sum() > 0:
-            avg_r = int((arr[:, :, 0] * arr[:, :, 3]).sum() / arr[:, :, 3].sum())
-            avg_g = int((arr[:, :, 1] * arr[:, :, 3]).sum() / arr[:, :, 3].sum())
-            avg_b = int((arr[:, :, 2] * arr[:, :, 3]).sum() / arr[:, :, 3].sum())
+        # int64 casting is required: the alpha weighted sum overflows in uint8
+        # (r*255 wraps mod 256), which made every textured block render black.
+        arr = np.array(img, dtype=np.int64)
+        alpha = arr[:, :, 3]
+        alpha_sum = int(alpha.sum())
+        if alpha_sum > 0:
+            avg_r = int((arr[:, :, 0] * alpha).sum() / alpha_sum)
+            avg_g = int((arr[:, :, 1] * alpha).sum() / alpha_sum)
+            avg_b = int((arr[:, :, 2] * alpha).sum() / alpha_sum)
         else:
-            avg_r, avg_g, avg_b = int(arr[:, :, 0].mean()), int(arr[:, :, 1].mean()), int(arr[:, :, 2].mean())
+            avg_r, avg_g, avg_b = (
+                int(arr[:, :, 0].mean()), int(arr[:, :, 1].mean()), int(arr[:, :, 2].mean()))
+        tint = _TEXTURE_TINTS.get(texture_name)
+        if tint is not None:
+            avg_r = min(255, int(avg_r * tint[0] / 255))
+            avg_g = min(255, int(avg_g * tint[1] / 255))
+            avg_b = min(255, int(avg_b * tint[2] / 255))
         # Alpha: average alpha, but at least 200 for opaque blocks
-        avg_a = max(200, int(arr[:, :, 3].mean())) if arr[:, :, 3].mean() > 100 else int(arr[:, :, 3].mean())
+        mean_alpha = float(alpha.mean())
+        avg_a = max(200, int(mean_alpha)) if mean_alpha > 100 else int(mean_alpha)
         color = (avg_r, avg_g, avg_b, avg_a)
         _TEXTURE_CACHE[cache_key] = color
         return color
@@ -281,8 +350,74 @@ def _normalize_block_name(block_name: str) -> str:
     return b
 
 
+def is_air_block(block_name: str) -> bool:
+    """True only for air-like blocks (exact match, not a substring test)."""
+    return _normalize_block_name(block_name) in AIR_BLOCK_NAMES
+
+
 def get_block_color(block_name: str) -> Tuple[int, int, int, int]:
-    """Get RGBA color for a Minecraft block, using real textures if available."""
+    """Get RGBA color for a Minecraft block (memoized per block name)."""
+    key = _normalize_block_name(block_name)
+    cached = _BLOCK_COLOR_CACHE.get(key)
+    if cached is not None:
+        return cached
+    color = _compute_block_color(block_name)
+    _BLOCK_COLOR_CACHE[key] = color
+    return color
+
+
+# ── Palette lookup tables ─────────────────────────────────────────────────────
+# A preview renders tens of thousands of voxels, so block names must never be
+# touched per voxel. All name/texture work happens once per palette here.
+
+_PALETTE_CACHE: Dict[str, Tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+_PALETTE_CACHE_LIMIT = 6
+
+
+def _palette_key(names: List[str]) -> str:
+    digest = hashlib.md5()
+    for name in names:
+        digest.update(name.encode("utf-8", "replace"))
+        digest.update(b"\x00")
+    return digest.hexdigest()
+
+
+def _palette_tables(id_to_block) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Build (colors, air, hides) tables for a block palette.
+
+    colors: uint8 (n, 4) average texture colour per block id
+    air:    bool  (n,)   block is invisible (air, cave_air, structure_void, ...)
+    hides:  bool  (n,)   block is fully opaque and hides the face behind it
+    """
+    names = ["" if name is None else str(name) for name in id_to_block]
+    key = _palette_key(names)
+    cached = _PALETTE_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    count = len(names)
+    colors = np.zeros((count, 4), dtype=np.uint8)
+    air = np.ones((count,), dtype=bool)
+    hides = np.zeros((count,), dtype=bool)
+    for index, name in enumerate(names):
+        if not name or is_air_block(name):
+            continue
+        color = get_block_color(name)
+        colors[index] = color
+        # alpha 0 means "not visible" (air copies, void); treat it as empty too
+        if color[3] <= 0:
+            continue
+        air[index] = False
+        hides[index] = color[3] >= 255
+
+    if len(_PALETTE_CACHE) >= _PALETTE_CACHE_LIMIT:
+        _PALETTE_CACHE.clear()
+    _PALETTE_CACHE[key] = (colors, air, hides)
+    return colors, air, hides
+
+
+def _compute_block_color(block_name: str) -> Tuple[int, int, int, int]:
+    """Resolve the RGBA color for a Minecraft block, using real textures if available."""
     raw = str(block_name).lower()
     b = _normalize_block_name(raw)
 
@@ -376,7 +511,7 @@ def get_block_color(block_name: str) -> Tuple[int, int, int, int]:
 
 
 def _draw_minecraft_backdrop(draw: ImageDraw.ImageDraw, size: Tuple[int, int]) -> None:
-    """Paint a quiet Minecraft-style sky behind the model."""
+    """Paint a quiet Minecraft-style sky behind the model (opaque RGB colours)."""
     w, h = size
     horizon = int(h * 0.58)
 
@@ -385,9 +520,9 @@ def _draw_minecraft_backdrop(draw: ImageDraw.ImageDraw, size: Tuple[int, int]) -
         r = int(92 + 48 * t)
         g = int(156 + 42 * t)
         b = int(217 + 24 * t)
-        draw.line([(0, y), (w, y)], fill=(r, g, b, 255))
+        draw.line([(0, y), (w, y)], fill=(r, g, b))
 
-    cloud = (232, 241, 246, 215)
+    cloud = (232, 241, 246)
     cloud_y = max(12, h // 12)
     for i, x in enumerate((w // 10, w // 2 + w // 8)):
         y = cloud_y + i * 18
@@ -396,16 +531,108 @@ def _draw_minecraft_backdrop(draw: ImageDraw.ImageDraw, size: Tuple[int, int]) -
         draw.rectangle([x + block, y - block, x + block * 3, y], fill=cloud)
 
     sun = max(18, min(w, h) // 12)
-    draw.rectangle([w - sun * 2, sun, w - sun, sun * 2], fill=(248, 224, 89, 255))
+    draw.rectangle([w - sun * 2, sun, w - sun, sun * 2], fill=(248, 224, 89))
 
 
-def _shade(color: Tuple[int, int, int, int], factor: float) -> Tuple[int, int, int, int]:
-    return (
-        max(0, min(255, int(color[0] * factor))),
-        max(0, min(255, int(color[1] * factor))),
-        max(0, min(255, int(color[2] * factor))),
-        color[3],
-    )
+# The sky is identical for every frame of a given size, so it is drawn once.
+_BACKDROP_CACHE: Dict[Tuple[int, int], Image.Image] = {}
+
+
+def _backdrop_image(size: Tuple[int, int]) -> Image.Image:
+    """Opaque RGB backdrop for the given size (cached, returned as a copy)."""
+    size = (int(size[0]), int(size[1]))
+    cached = _BACKDROP_CACHE.get(size)
+    if cached is None:
+        cached = Image.new("RGB", size, (112, 178, 226))
+        _draw_minecraft_backdrop(ImageDraw.Draw(cached), size)
+        if len(_BACKDROP_CACHE) >= 4:
+            _BACKDROP_CACHE.clear()
+        _BACKDROP_CACHE[size] = cached
+    return cached.copy()
+
+
+def _shade_array(colors: np.ndarray, factor: float) -> np.ndarray:
+    """Vectorised face shading: (n, 4) uint8 in, (n, 4) uint8 out.
+
+    Alpha is kept, RGB is scaled, clamped and truncated towards zero - the same
+    result the previous per-face Python implementation produced.
+    """
+    scaled = colors.astype(np.float64) * factor
+    return np.minimum(255.0, scaled).astype(np.uint8)
+
+
+def _pack_rgba(rgba: np.ndarray) -> np.ndarray:
+    """Pack (n, 4) uint8 RGBA rows into the int32 "ink" values PIL uses."""
+    r = rgba[:, 0].astype(np.int64)
+    g = rgba[:, 1].astype(np.int64)
+    b = rgba[:, 2].astype(np.int64)
+    a = rgba[:, 3].astype(np.int64)
+    packed = (a << 24) | (b << 16) | (g << 8) | r
+    packed = np.where(packed >= 0x80000000, packed - 0x100000000, packed)
+    return packed.astype(np.int32)
+
+
+def _unpack_rgba(ink: int) -> Tuple[int, int, int, int]:
+    value = int(ink) & 0xFFFFFFFF
+    return (value & 0xFF, (value >> 8) & 0xFF, (value >> 16) & 0xFF, (value >> 24) & 0xFF)
+
+
+def _low_level_polygon_ok() -> bool:
+    """Check whether the low-level PIL polygon call matches the high-level one.
+
+    ``ImageDraw.polygon`` costs two ``_getink`` calls per quad; calling
+    ``ImagingDraw.draw_polygon`` with pre-packed inks is ~35 % faster. Inks are
+    passed exactly as ``_getink`` would produce them, including alpha blending
+    (the renderer draws with mode "RGBA" on an RGB image), and the result is
+    compared against the documented API. If a future Pillow changes the
+    convention the renderer silently falls back instead of drawing garbage.
+    """
+    sample = [(1, 1), (6, 2), (5, 6), (2, 5)]
+    fills = ((0, 0, 255, 128), (0, 128, 0, 255))
+    try:
+        reference = Image.new("RGB", (8, 8), (200, 40, 40))
+        ImageDraw.Draw(reference, "RGBA").polygon(sample, fill=fills[0], outline=fills[1])
+        fast = Image.new("RGB", (8, 8), (200, 40, 40))
+        batch = _PolygonBatch(ImageDraw.Draw(fast, "RGBA"), fast=True)
+        inks = _pack_rgba(np.array(fills, dtype=np.uint8))
+        batch.quad([list(point) for point in sample], int(inks[0]), int(inks[1]))
+        return bool(np.array_equal(np.array(reference), np.array(fast)))
+    except Exception:  # noqa: BLE001 - any PIL change falls back to the safe path
+        return False
+
+
+class _PolygonBatch:
+    """Draws filled+outlined quads through the fastest available PIL path.
+
+    Inks are always packed int32 values; when the low-level call is unavailable
+    (or fails) they are unpacked back to tuples for the documented
+    :mod:`ImageDraw` API.
+    """
+
+    __slots__ = ("_draw", "_fast", "_low")
+
+    def __init__(self, draw: ImageDraw.ImageDraw, fast: bool = True):
+        self._draw = draw
+        self._fast = bool(fast)
+        self._low = getattr(getattr(draw, "draw", None), "draw_polygon", None)
+
+    def quad(self, points: List[List[float]], fill_ink: int, outline_ink: int) -> None:
+        if self._fast and self._low is not None:
+            try:
+                self._low(points, fill_ink, 1)
+                self._low(points, outline_ink, 0, 1)
+                return
+            except (TypeError, ValueError, SystemError):
+                self._fast = False
+        self._draw.polygon(points, fill=_unpack_rgba(fill_ink),
+                           outline=_unpack_rgba(outline_ink))
+
+    def markers(self):
+        """High-level draw object (ellipse/text for unsaved blocks)."""
+        return self._draw
+
+
+_LOW_LEVEL_POLYGON_OK = _low_level_polygon_ok()
 
 
 def _draw_rotating_build_plate(
@@ -473,6 +700,223 @@ def _draw_rotating_build_plate(
         draw.line([project(x0, y_top, z), project(x1, y_top, z)], fill=grid_color, width=1)
 
 
+# ── Scene preparation ─────────────────────────────────────────────────────────
+
+# Face table: normal, the 4 corner offsets of the unit cube, brightness factor.
+_FACE_TABLE = (
+    ((0, 1, 0), ((0, 1, 0), (1, 1, 0), (1, 1, 1), (0, 1, 1)), 1.18),
+    ((1, 0, 0), ((1, 0, 0), (1, 0, 1), (1, 1, 1), (1, 1, 0)), 0.92),
+    ((0, 0, 1), ((0, 0, 1), (0, 1, 1), (1, 1, 1), (1, 0, 1)), 0.82),
+    ((-1, 0, 0), ((0, 0, 1), (0, 0, 0), (0, 1, 0), (0, 1, 1)), 0.70),
+    ((0, 0, -1), ((1, 0, 0), (1, 1, 0), (0, 1, 0), (0, 0, 0)), 0.76),
+    ((0, -1, 0), ((0, 0, 1), (1, 0, 1), (1, 0, 0), (0, 0, 0)), 0.58),
+)
+_FACE_DIRS = np.array([face[0] for face in _FACE_TABLE], dtype=np.int64)
+_FACE_CORNERS = np.array([face[1] for face in _FACE_TABLE], dtype=np.float64)
+_FACE_SHADES = np.array([face[2] for face in _FACE_TABLE], dtype=np.float64)
+_UNSAVED_COLOR = (220, 38, 38, 255)
+
+
+class VoxelScene:
+    """Camera independent, pre-digested form of a voxel grid.
+
+    Building a scene resolves every block name/colour once and stores compact
+    numpy arrays, which makes re-rendering for a new camera angle cheap.
+    """
+
+    __slots__ = ("shape", "count", "coords", "rel", "colors", "unsaved", "occ")
+
+    def __init__(self, shape, coords, rel, colors, unsaved, occ):
+        self.shape = shape
+        self.coords = coords
+        self.rel = rel
+        self.colors = colors
+        self.unsaved = unsaved
+        self.occ = occ
+        self.count = int(coords.shape[0])
+
+    @classmethod
+    def build(cls, grid, id_to_block) -> "VoxelScene":
+        arr = np.asarray(grid)
+        if arr.ndim != 3:
+            raise ValueError(f"grid must be a 3D array, got shape {arr.shape}")
+        shape = tuple(int(v) for v in arr.shape)
+        palette_size = len(id_to_block)
+
+        if not np.issubdtype(arr.dtype, np.integer):
+            arr = np.rint(arr)                      # generated grids may be float
+        ids = np.asarray(arr, dtype=np.int64)
+        unsaved_grid = (ids < 0) | (ids >= palette_size)
+
+        if palette_size:
+            colors_lut, air_lut, hides_lut = _palette_tables(id_to_block)
+            safe = np.where(unsaved_grid, 0, ids)
+            air_grid = np.where(unsaved_grid, False, air_lut[safe])
+            hides_grid = np.where(unsaved_grid, True, hides_lut[safe])
+        else:
+            safe = None
+            air_grid = np.zeros(shape, dtype=bool)
+            hides_grid = np.ones(shape, dtype=bool)
+
+        # Occupancy padded by one block so neighbour lookups need no bounds test.
+        padded = np.zeros((shape[0] + 2, shape[1] + 2, shape[2] + 2), dtype=bool)
+        padded[1:-1, 1:-1, 1:-1] = hides_grid
+
+        flat_index = np.flatnonzero((~air_grid).reshape(-1))
+        coords = np.stack(np.unravel_index(flat_index, shape), axis=1).astype(np.int32)
+        rel = coords.astype(np.float32) - np.array(
+            [shape[0] / 2.0, shape[1] / 2.0, shape[2] / 2.0], dtype=np.float32)
+
+        unsaved = unsaved_grid.reshape(-1)[flat_index]
+        if palette_size and flat_index.size:
+            colors = np.array(colors_lut[safe.reshape(-1)[flat_index]], dtype=np.uint8)
+        else:
+            colors = np.zeros((flat_index.size, 4), dtype=np.uint8)
+        if unsaved.any():
+            colors[unsaved] = _UNSAVED_COLOR
+
+        return cls(shape, coords, rel, colors, unsaved, padded)
+
+
+def _visible_faces(scene: VoxelScene, cam_x: float, cam_y: float, cam_z: float):
+    """(face index, voxel indices) for every face that is facing and unoccluded."""
+    faces = []
+    for index in range(len(_FACE_TABLE)):
+        nx, ny, nz = _FACE_DIRS[index]
+        if nx * cam_x + ny * cam_y + nz * cam_z <= 0:
+            continue                                  # back facing
+        # A face is hidden when the neighbour in that direction is opaque.
+        hidden = scene.occ[scene.coords[:, 0] + 1 + nx,
+                           scene.coords[:, 1] + 1 + ny,
+                           scene.coords[:, 2] + 1 + nz]
+        selected = np.flatnonzero(~hidden)
+        if selected.size:
+            faces.append((index, selected))
+    return faces
+
+
+def render_scene(
+    scene: VoxelScene,
+    size: Tuple[int, int] = (420, 380),
+    azimuth: float = 45.0,
+    elevation: float = 30.0,
+    scale: float = 3.5,
+    stats: Optional[Dict[str, int]] = None,
+) -> Image.Image:
+    """Render a prepared :class:`VoxelScene` for one camera angle."""
+    width, height = max(1, int(size[0])), max(1, int(size[1]))
+    img = _backdrop_image((width, height))
+    # mode "RGBA" on an RGB image makes PIL alpha blend every polygon into the
+    # image, so transparent blocks are drawn in depth order like any other face.
+    draw = ImageDraw.Draw(img, "RGBA")
+    batch = _PolygonBatch(draw, fast=_LOW_LEVEL_POLYGON_OK)
+
+    az_rad = math.radians(azimuth)
+    el_rad = math.radians(elevation)
+    cam_x = math.cos(el_rad) * math.sin(az_rad)
+    cam_y = math.sin(el_rad)
+    cam_z = math.cos(el_rad) * math.cos(az_rad)
+
+    # Right vector = cross(camera, up)
+    rx = -cam_z
+    ry = 0.0
+    rz = cam_x
+    rlen = math.sqrt(rx * rx + ry * ry + rz * rz) or 1
+    rx, ry, rz = rx / rlen, ry / rlen, rz / rlen
+
+    # Up vector = cross(right, camera)
+    ux = ry * cam_z - rz * cam_y
+    uy = rz * cam_x - rx * cam_z
+    uz = rx * cam_y - ry * cam_x
+
+    def project(wx: float, wy: float, wz: float) -> Tuple[float, float]:
+        sx = wx * rx + wy * ry + wz * rz
+        sy = wx * ux + wy * uy + wz * uz
+        return width / 2 + sx * scale, height / 2 - sy * scale
+
+    _draw_rotating_build_plate(draw, project, scene.shape)
+
+    if scene.count == 0:
+        draw.rectangle([0, 0, width - 1, height - 1], outline=(60, 80, 120))
+        draw.text((10, 10), "No blocks to display", fill=(120, 150, 200))
+        if stats is not None:
+            stats["voxels"] = 0
+            stats["faces"] = 0
+        return img
+
+    rel = scene.rel
+    cam = np.array([cam_x, cam_y, cam_z], dtype=np.float32)
+    right = np.array([rx, ry, rz], dtype=np.float32)
+    up = np.array([ux, uy, uz], dtype=np.float32)
+    depth = rel @ cam + 0.5 * (cam_x + cam_y + cam_z)
+    base_x = width / 2 + (rel @ right) * scale
+    base_y = height / 2 - (rel @ up) * scale
+
+    faces = _visible_faces(scene, cam_x, cam_y, cam_z)
+    if not faces:
+        return img
+    voxel_index = np.concatenate([selected for _, selected in faces])
+    face_index = np.concatenate(
+        [np.full(selected.size, index, dtype=np.int8) for index, selected in faces])
+    if stats is not None:
+        stats["voxels"] = scene.count
+        stats["faces"] = int(voxel_index.size)
+
+    # Painter's algorithm: draw far faces first so near ones cover them.
+    order = np.argsort(depth[voxel_index], kind="stable")
+    voxel_index = voxel_index[order]
+    face_index = face_index[order]
+    del order, faces
+
+    corners = _FACE_CORNERS[face_index]
+    pts = np.empty((voxel_index.size, 4, 2), dtype=np.float64)
+    pts[:, :, 0] = base_x[voxel_index][:, None] + (corners @ right.astype(np.float64)) * scale
+    pts[:, :, 1] = base_y[voxel_index][:, None] - (corners @ up.astype(np.float64)) * scale
+
+    colors = scene.colors[voxel_index]
+    rgb = colors[:, :3].astype(np.float64)
+    shades = _FACE_SHADES[face_index][:, None]
+    fills = np.empty((colors.shape[0], 4), dtype=np.uint8)
+    fills[:, :3] = np.minimum(255.0, rgb * shades)
+    fills[:, 3] = colors[:, 3]
+    outlines = np.empty_like(fills)
+    outlines[:, :3] = np.minimum(255.0, rgb * 0.48)
+    outlines[:, 3] = colors[:, 3]
+
+    points = pts.tolist()
+    fill_inks = _pack_rgba(fills).tolist()
+    outline_inks = _pack_rgba(outlines).tolist()
+    del pts, colors, rgb, fills, outlines, corners
+
+    # Painter's algorithm in strict depth order. Transparent blocks need alpha
+    # blending, which PIL performs per polygon when the draw object is created
+    # with mode "RGBA" on an RGB image. The previous renderer instead blended a
+    # full size overlay once per transparent voxel (~0.3 ms each), which was by
+    # far the biggest cost of a frame.
+    for index in range(len(points)):
+        batch.quad(points[index], fill_inks[index], outline_inks[index])
+
+    if scene.unsaved.any():
+        marker_draw = batch.markers()
+        marker_font = ImageFont.load_default()
+        radius = max(5, int(scale * 0.9))
+        marker_dx = (0.5 * rx + 0.62 * ry + 0.5 * rz) * scale
+        marker_dy = (0.5 * ux + 0.62 * uy + 0.5 * uz) * scale
+        for index in np.flatnonzero(scene.unsaved).tolist():
+            mx = base_x[index] + marker_dx
+            my = base_y[index] - marker_dy
+            marker_draw.ellipse(
+                [mx - radius, my - radius, mx + radius, my + radius],
+                fill=(255, 236, 153, 245),
+                outline=(120, 22, 22, 255),
+                width=2,
+            )
+            marker_draw.text((mx, my - 1), "!", fill=(120, 22, 22, 255),
+                             font=marker_font, anchor="mm")
+
+    return img
+
+
 def render_orbital(
     grid: np.ndarray,
     id_to_block: List[str],
@@ -480,9 +924,10 @@ def render_orbital(
     azimuth: float = 45.0,
     elevation: float = 30.0,
     scale: float = 3.5,
+    scene: Optional[VoxelScene] = None,
 ) -> Image.Image:
     """Render the voxel grid with full orbital camera controls.
-    
+
     Args:
         grid: 3D numpy array [X, Y, Z] of block IDs
         id_to_block: mapping from ID to block name
@@ -490,125 +935,115 @@ def render_orbital(
         azimuth: camera rotation around Y axis in degrees (0-360)
         elevation: camera angle above horizon in degrees (0-90)
         scale: voxel size in pixels
-    
+        scene: optional pre-built :class:`VoxelScene` (rebuilt when omitted)
+
     Returns:
         PIL Image with rendered structure
     """
-    GX, GY, GZ = grid.shape
-    img = Image.new("RGBA", size, (112, 178, 226, 255))
-    draw = ImageDraw.Draw(img)
-    _draw_minecraft_backdrop(draw, size)
+    if scene is None:
+        scene = VoxelScene.build(grid, id_to_block)
+    return render_scene(scene, size=size, azimuth=azimuth, elevation=elevation, scale=scale)
 
-    # Convert angles to radians
-    az_rad = math.radians(azimuth)
-    el_rad = math.radians(elevation)
 
-    # Camera direction vector
-    cam_x = math.cos(el_rad) * math.sin(az_rad)
-    cam_y = math.sin(el_rad)
-    cam_z = math.cos(el_rad) * math.cos(az_rad)
+class PreviewRenderer:
+    """Renders preview images on a worker thread and drops stale frames.
 
-    # Right vector = cross(camera, up)
-    up = (0, 1, 0)
-    rx = cam_y * up[2] - cam_z * up[1]
-    ry = cam_z * up[0] - cam_x * up[2]
-    rz = cam_x * up[1] - cam_y * up[0]
-    rlen = math.sqrt(rx*rx + ry*ry + rz*rz) or 1
-    rx, ry, rz = rx/rlen, ry/rlen, rz/rlen
+    While the camera is dragged, requests arrive much faster than frames can be
+    rendered. Queueing them would create a growing lag, so only the newest
+    request is kept and intermediate camera positions are skipped. Finishing an
+    image never touches Tk - the GUI polls :meth:`take_latest` from its own loop.
+    """
 
-    # Up vector = cross(right, camera)
-    ux = ry * cam_z - rz * cam_y
-    uy = rz * cam_x - rx * cam_z
-    uz = rx * cam_y - ry * cam_x
+    def __init__(self, render: Optional[Callable[..., Image.Image]] = None):
+        self._render = render or render_scene
+        self._cond = threading.Condition()
+        self._pending: Optional[Tuple[Any, Dict[str, Any]]] = None
+        self._result: Optional[Image.Image] = None
+        self._busy = False
+        self._stopped = False
+        self._thread: Optional[threading.Thread] = None
+        self._rendered = 0
+        self._dropped = 0
 
-    # Center of grid
-    cx, cy, cz = GX / 2, GY / 2, GZ / 2
+    def request(self, scene: VoxelScene, **params: Any) -> None:
+        """Ask for a new frame (non blocking, replaces a pending request)."""
+        with self._cond:
+            if self._stopped:
+                return
+            if self._pending is not None:
+                self._dropped += 1
+            self._pending = (scene, params)
+            self._busy = True
+            if self._thread is None:
+                self._thread = threading.Thread(target=self._run, name="voxel-preview",
+                                                daemon=True)
+                self._thread.start()
+            self._cond.notify_all()
 
-    def project(wx: float, wy: float, wz: float) -> Tuple[float, float]:
-        sx = wx * rx + wy * ry + wz * rz
-        sy = wx * ux + wy * uy + wz * uz
-        return size[0] / 2 + sx * scale, size[1] / 2 - sy * scale
+    def _run(self) -> None:
+        while True:
+            with self._cond:
+                while self._pending is None and not self._stopped:
+                    self._cond.wait()
+                if self._stopped:
+                    return
+                pending = self._pending
+                self._pending = None
+            scene, params = pending
+            try:
+                image = self._render(scene, **params)
+            except Exception:                      # noqa: BLE001 - keep the GUI alive
+                logger.exception("preview render failed")
+                image = None
+            with self._cond:
+                if image is not None:
+                    self._result = image
+                    self._rendered += 1
+                if self._pending is None:
+                    self._busy = False
+                self._cond.notify_all()
 
-    _draw_rotating_build_plate(draw, project, grid.shape)
+    def take_latest(self) -> Optional[Image.Image]:
+        """Return the newest finished frame once, or None if there is no new one."""
+        with self._cond:
+            image, self._result = self._result, None
+            return image
 
-    # Collect visible voxels
-    voxels = []
-    for x in range(GX):
-        for y in range(GY):
-            for z in range(GZ):
-                bid = int(grid[x, y, z])
-                unsaved = bid < 0 or bid >= len(id_to_block)
-                if unsaved:
-                    block_name = "<nicht gespeichert>"
-                    color = (220, 38, 38, 255)
-                else:
-                    block_name = str(id_to_block[bid])
-                    if "air" in block_name.lower():
-                        continue
-                    color = get_block_color(block_name)
-                wx, wy, wz = x - cx, y - cy, z - cz
-                sd = (wx + 0.5) * cam_x + (wy + 0.5) * cam_y + (wz + 0.5) * cam_z
-                voxels.append((sd, wx, wy, wz, color, unsaved))
+    def is_busy(self) -> bool:
+        with self._cond:
+            return self._busy
 
-    if not voxels:
-        draw.rectangle([0, 0, size[0]-1, size[1]-1], outline=(60, 80, 120))
-        draw.text((10, 10), "No blocks to display", fill=(120, 150, 200))
-        return img
+    def wait_idle(self, timeout: float = 30.0) -> bool:
+        with self._cond:
+            return self._cond.wait_for(lambda: not self._busy, timeout=timeout)
 
-    # Sort back-to-front
-    voxels.sort(key=lambda v: v[0])
+    def stats(self) -> Dict[str, int]:
+        with self._cond:
+            return {"rendered": self._rendered, "dropped": self._dropped}
 
-    faces = [
-        ((0, 1, 0), [(0, 1, 0), (1, 1, 0), (1, 1, 1), (0, 1, 1)], 1.18),
-        ((1, 0, 0), [(1, 0, 0), (1, 0, 1), (1, 1, 1), (1, 1, 0)], 0.92),
-        ((0, 0, 1), [(0, 0, 1), (0, 1, 1), (1, 1, 1), (1, 0, 1)], 0.82),
-        ((-1, 0, 0), [(0, 0, 1), (0, 0, 0), (0, 1, 0), (0, 1, 1)], 0.70),
-        ((0, 0, -1), [(1, 0, 0), (1, 1, 0), (0, 1, 0), (0, 0, 0)], 0.76),
-        ((0, -1, 0), [(0, 0, 1), (1, 0, 1), (1, 0, 0), (0, 0, 0)], 0.58),
-    ]
+    def stop(self, timeout: float = 3.0) -> None:
+        with self._cond:
+            self._stopped = True
+            self._pending = None
+            self._busy = False
+            self._cond.notify_all()
+            thread = self._thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=timeout)
 
-    marker_font = ImageFont.load_default()
 
-    for sd, wx, wy, wz, color, unsaved in voxels:
-        alpha = color[3] if len(color) == 4 else 255
-        target = img
-        face_draw = draw
-        if alpha < 255:
-            overlay = Image.new("RGBA", size, (0, 0, 0, 0))
-            face_draw = ImageDraw.Draw(overlay)
-            target = overlay
+# View presets: name -> (azimuth, elevation)
+VIEW_ANGLES: Dict[str, Tuple[float, float]] = {
+    "isometric": (45.0, 30.0),
+    "topdown": (0.0, 89.0),
+    "side": (0.0, 5.0),
+}
 
-        for normal, corners, shade in faces:
-            nx, ny, nz = normal
-            if nx * cam_x + ny * cam_y + nz * cam_z <= 0:
-                continue
-            pts = [project(wx + dx, wy + dy, wz + dz) for dx, dy, dz in corners]
-            fill = _shade(color, shade)
-            outline = _shade(color, 0.48)
-            face_draw.polygon(pts, fill=fill, outline=outline)
 
-        if alpha < 255:
-            img = Image.alpha_composite(img, overlay)
-            draw = ImageDraw.Draw(img)
-
-        if unsaved:
-            mx, my = project(wx + 0.5, wy + 0.62, wz + 0.5)
-            radius = max(5, int(scale * 0.9))
-            draw.ellipse(
-                [mx - radius, my - radius, mx + radius, my + radius],
-                fill=(255, 236, 153, 245),
-                outline=(120, 22, 22, 255),
-                width=2,
-            )
-            draw.text(
-                (mx, my - 1),
-                "!",
-                fill=(120, 22, 22, 255),
-                font=marker_font,
-                anchor="mm",
-            )
-
-    return img
+def view_angles(view: str, azimuth: float = 45.0,
+                elevation: float = 30.0) -> Tuple[float, float]:
+    """Camera angles for a view preset; other names keep the given angles."""
+    return VIEW_ANGLES.get(view, (azimuth, elevation))
 
 
 def render_isometric(grid, id_to_block, size=(420, 380), scale=3.5):
@@ -634,16 +1069,13 @@ def render_preview(
     azimuth: float = 45.0,
     elevation: float = 30.0,
     scale: float = 3.5,
+    scene: Optional[VoxelScene] = None,
 ) -> Image.Image:
     """Render a preview with the given camera angle.
-    
+
     view can be: "free" (custom az/el), "isometric", "topdown", "side"
+    scene may be a pre-built :class:`VoxelScene` to skip the preparation step.
     """
-    if view == "isometric":
-        return render_isometric(grid, id_to_block, size, scale=scale)
-    elif view == "topdown":
-        return render_topdown(grid, id_to_block, size, scale=scale)
-    elif view == "side":
-        return render_side(grid, id_to_block, size, scale=scale)
-    else:
-        return render_orbital(grid, id_to_block, size, azimuth=azimuth, elevation=elevation, scale=scale)
+    azimuth, elevation = view_angles(view, azimuth, elevation)
+    return render_orbital(grid, id_to_block, size=size, azimuth=azimuth,
+                          elevation=elevation, scale=scale, scene=scene)

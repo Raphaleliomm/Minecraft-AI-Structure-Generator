@@ -35,7 +35,7 @@ def test_tokenizers_and_schem_roundtrip():
     voxel_tokenizer.fit([schematic], target_size=(2, 2, 2))
     grid = voxel_tokenizer.encode_blocks(schematic.blocks, schematic.size, (2, 2, 2))
 
-    out_dir = Path("test_outputs")
+    out_dir = Path(__file__).resolve().parents[1] / "test_outputs"
     out_dir.mkdir(exist_ok=True)
     out = out_dir / "roundtrip.schem"
     save_schem(out, grid, voxel_tokenizer.id_to_block)

@@ -44,6 +44,57 @@ MODEL_TO_ID = {entry[0]: entry[1] for entry in SUPPORTED_MODELS}
 MODEL_TO_TYPE = {entry[0]: entry[2] for entry in SUPPORTED_MODELS}
 MODEL_MAX_LENGTH = {entry[0]: entry[3] for entry in SUPPORTED_MODELS}
 
+# Hidden dimension per encoder - used when a model is not loaded yet
+# (Kaggle export, UI hints). Kept next to SUPPORTED_MODELS so it cannot drift.
+ENCODER_HIDDEN_DIMS = {
+    "Phi-3.5-mini": 3072,
+    "Gemma-2-2B": 2304,
+    "Gemma-2-9B": 3584,
+    "Gemma-2-27B": 4608,
+    "Gemma-3-1B": 768,
+    "Gemma-3-4B": 2560,
+    "Gemma-3-12B": 3840,
+    "Gemma-3-27B": 5120,
+    "Flan-T5-small": 512,
+    "Flan-T5-base": 768,
+    "Flan-T5-large": 1024,
+    "Flan-T5-XL": 2048,
+    "Flan-T5-XXL": 4096,
+}
+DEFAULT_ENCODER_HIDDEN_DIM = ENCODER_HIDDEN_DIMS["Phi-3.5-mini"]
+
+# Ungefaehre Parameterzahl in Milliarden. Nur fuer die Frage "Encoder in den
+# VRAM oder in den System-RAM?" und fuer Hinweistexte gedacht - die genaue
+# Groesse liefert erst ``from_pretrained``, deshalb wird der Wert mit
+# Sicherheitsabstand verwendet. Fuer T5 zaehlt nur der Encoder (den laedt die
+# App), fuer die Decoder-Modelle ist der LM-Kopf bereits abgezogen.
+ENCODER_PARAMS_B = {
+    "Phi-3.5-mini": 3.8,
+    "Gemma-2-2B": 2.6,
+    "Gemma-2-9B": 9.2,
+    "Gemma-2-27B": 27.2,
+    "Gemma-3-1B": 1.0,
+    "Gemma-3-4B": 4.3,
+    "Gemma-3-12B": 12.2,
+    "Gemma-3-27B": 27.4,
+    "Flan-T5-small": 0.035,
+    "Flan-T5-base": 0.11,
+    "Flan-T5-large": 0.34,
+    "Flan-T5-XL": 1.4,
+    "Flan-T5-XXL": 4.8,
+}
+
+
+def encoder_working_set_bytes(model_name: str, item_bytes: int = 2) -> int:
+    """Geschaetzter Speicherbedarf der Encoder-Gewichte in Byte (0 = unbekannt).
+
+    ``item_bytes=2`` entspricht fp16 (VRAM- und RAM-Fallback), ``4`` fp32.
+    """
+    params_b = ENCODER_PARAMS_B.get(model_name)
+    if not params_b:
+        return 0
+    return int(float(params_b) * 1e9 * max(1, int(item_bytes)))
+
 
 class FrozenTransformerEncoder(nn.Module):
     """Wraps a pre-trained transformer, freezes all weights, tokenizes text,
@@ -83,9 +134,12 @@ class FrozenTransformerEncoder(nn.Module):
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token or "<pad>"
 
-        # Load model with fp16 to save RAM, then move to target device
-        # Use the requested dtype (typically float16 for CUDA, float32 for CPU)
-        load_dtype = dtype if device.type == "cuda" else torch.float32
+        # Load model with fp16 to save RAM, then move to target device.
+        # Der angeforderte dtype gilt auch auf der CPU: grosse Encoder passen nur
+        # in fp16 in den RAM (Phi-3.5-mini: ~15 GB in fp32, ~7,6 GB in fp16).
+        # Aufrufer, die fp32 wollen (kleine Encoder, GPU aus), uebergeben es
+        # weiterhin explizit - siehe app/main_app.py.
+        load_dtype = dtype
         common_kwargs = dict(
             device_map=None,
             torch_dtype=load_dtype,
@@ -100,12 +154,19 @@ class FrozenTransformerEncoder(nn.Module):
             # For decoder models we only need the base transformer, not the LM head.
             if hasattr(self.model, "model") and hasattr(self.model.model, "embed_tokens"):
                 self.transformer = self.model.model
+                # Drop the LM head (~100M params for Phi-3.5): we only read hidden
+                # states, so the logits projection is pure waste of VRAM/time.
+                if hasattr(self.model, "lm_head"):
+                    try:
+                        self.model.lm_head = None
+                    except Exception:
+                        logger.debug("LM-Head konnte nicht entfernt werden", exc_info=True)
             else:
                 self.transformer = self.model
 
         # Ensure model is on the correct device
         self.model = self.model.to(device)
-        if device.type == "cuda" and dtype != torch.float32:
+        if dtype != torch.float32 and getattr(self.model, "dtype", None) != dtype:
             self.model = self.model.to(dtype)
 
         # Freeze ALL weights - these should NEVER be trained
@@ -140,13 +201,12 @@ class FrozenTransformerEncoder(nn.Module):
         dummy = self.tokenizer("test", return_tensors="pt", padding=True)
         dummy = {k: v.to(self.device) for k, v in dummy.items()}
         with torch.no_grad():
-            if self.model_type == "encoder":
-                out = self.model(**dummy)
-                return out.last_hidden_state.shape[-1]
-            else:
-                out = self.model(**dummy, output_hidden_states=True)
-                # For decoder models, get the last hidden state of the last layer
-                return out.hidden_states[-1].shape[-1]
+            out = self._base_model()(**dummy)
+            return out.last_hidden_state.shape[-1]
+
+    def _base_model(self):
+        """The module that produces hidden states (never the LM head)."""
+        return self.transformer if self.model_type != "encoder" else self.model
 
     @torch.no_grad()
     def forward(self, text_prompts: list[str]) -> dict:
@@ -180,14 +240,15 @@ class FrozenTransformerEncoder(nn.Module):
             )
             last_hidden = outputs.last_hidden_state
         else:
-            # Decoder models (Phi-3.5, Gemma)
-            outputs = self.model(
+            # Decoder models (Phi-3.5, Gemma): use the base transformer without the
+            # LM head. output_hidden_states=False + last_hidden_state is the final
+            # layer (hidden_states[-1]) without materialising every layer.
+            outputs = self._base_model()(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
-                output_hidden_states=True,
+                output_hidden_states=False,
             )
-            # Last hidden state from the final decoder layer
-            last_hidden = outputs.hidden_states[-1]
+            last_hidden = outputs.last_hidden_state
 
         return {
             "last_hidden_state": last_hidden.to(self.dtype),

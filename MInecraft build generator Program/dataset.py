@@ -1,21 +1,67 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+from collections import OrderedDict
+from collections.abc import Sequence
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
 
+import numpy as np
 import torch
+import torch.nn.functional as F
 from nbtlib import File
 from nbtlib import tag as T
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, default_collate
 
 
 AIR = "minecraft:air"
 SCHEM_EXTENSIONS = {".schem", ".schematic"}
 
+# Separator between the prompt blocks of one sidecar (scrape_phantommarket.py
+# writes sidecars in exactly this format).
+PROMPT_SEPARATOR = "---"
+
+# Metadata prefixes that are filtered out of prompt sidecars (.txt). Single
+# source of truth - app/hidden_state_cache.py delegates to split_prompt_text()
+# so cache and dataset always agree on the prompt list.
+META_PROMPT_PREFIXES = ("source:", "aug:", "author:", "name:", "url:", "id:")
+
+# Kept as an alias for older call sites / documentation.
+META_PREFIXES = META_PROMPT_PREFIXES
+
+
+def split_prompt_text(text: str) -> List[str]:
+    """Split a prompt sidecar on '---' and drop pure metadata sections.
+
+    Current format - first block is the structure name, then the description.
+    Every block is one prompt, so a structure yields two training examples:
+
+        "<name>---<description>" -> ["<name>", "<description>"]
+
+    Legacy format of the scraper (provenance lines, no name prompt):
+
+        "<meta lines>---<prompt>---<prompt>" -> ["<prompt>", "<prompt>"]
+    """
+    prompts: List[str] = []
+    for part in (chunk.strip() for chunk in str(text).split(PROMPT_SEPARATOR)):
+        if not part:
+            continue
+        if any(part.lower().startswith(prefix) for prefix in META_PROMPT_PREFIXES):
+            continue
+        prompts.append(part)
+    return prompts
+
 # ─── Block state handling ───
+#
+# Die drei Zustands-Helfer sind reine Funktionen der Blocknamen und werden fuer
+# JEDEN Voxel jeder Struktur aufgerufen (Millionen Aufrufe, aber nur wenige
+# hundert verschiedene Namen). Ohne Memoisierung erzeugt jeder Aufruf einen
+# neuen String - das war der groesste Einzelposten beim Arbeitsspeicher.
+BLOCK_STATE_CACHE_SIZE = int(os.environ.get("MINECRAFT_AI_BLOCKSTATE_CACHE", "200000"))
 
 BLOCK_STATE_PATTERN = re.compile(r"^([a-z0-9_:-]+)(\[.*\])?$")
 
@@ -33,19 +79,22 @@ UNIMPORTANT_BLOCK_STATES = {
     "stage", "distance", "persistent", "check_decay", "decayable",
     "player_placed", "triggered", "unstable", "inverted", "natural",
     "extended", "enabled", "signal_fire", "cracked",
-    "hatch", "type", "facing_except_up", "east", "west", "north", "south",
+    "hatch", "facing_except_up", "east", "west", "north", "south",
     "up", "down", "snowy", "berries", "honey_level",
     "face", "attached", "powered", "locked",
     "candles", "instrument", "note", "bites", "eggs", "pickles",
     "bloom", "crackedness", "tilt",
 }
 
+@lru_cache(maxsize=BLOCK_STATE_CACHE_SIZE)
 def strip_block_state(block_name: str) -> str:
     """Strip ALL block states. 'minecraft:oak_stairs[facing=north,waterlogged=true]' -> 'minecraft:oak_stairs'
     Used for backward compatibility."""
     m = BLOCK_STATE_PATTERN.match(block_name)
     return m.group(1) if m else block_name
 
+
+@lru_cache(maxsize=BLOCK_STATE_CACHE_SIZE)
 def keep_important_states(block_name: str) -> str:
     """Keep only important block states (facing, axis, half, waterlogged, open, type, rotation).
     'minecraft:oak_stairs[facing=north,waterlogged=true,age=2]' -> 'minecraft:oak_stairs[facing=north,waterlogged=true]'
@@ -116,6 +165,7 @@ def _rotate_direction_y(value: str, quarter_turns: int) -> str:
     return _HORIZONTAL_DIRECTIONS[(idx + quarter_turns) % 4]
 
 
+@lru_cache(maxsize=BLOCK_STATE_CACHE_SIZE)
 def rotate_block_state_y(block_name: str, quarter_turns: int) -> str:
     """Rotate orientation-sensitive block states around Y by 90° steps.
 
@@ -205,6 +255,71 @@ def trim_block_grid(grid: list[list[list[str]]]) -> list[list[list[str]]]:
     ]
 
 
+def _axis_bounds(flags: "np.ndarray") -> tuple[int, int]:
+    """Erster und letzter True-Index eines 1D-Boolean-Arrays."""
+    first = int(np.argmax(flags))
+    last = int(flags.shape[0] - 1 - np.argmax(flags[::-1]))
+    return first, last
+
+
+def trimmed_block_bounds(
+    blocks: list[str],
+    size: tuple[int, int, int],
+) -> tuple[int, int, int, int, int, int] | None:
+    """Enger Bounding-Box der Nicht-Luft-Voxel: (min_x, min_y, min_z, max_x, max_y, max_z).
+
+    Gleiches Ergebnis wie ``trim_block_grid(blocks_to_grid(...))``, aber ohne
+    verschachtelte Python-Listen: ein Boolean-Array der Groesse
+    ``Width*Height*Length`` wird per numpy in einem Durchgang pro Achse
+    reduziert. Die alten Tripel-Schleifen liefen fuer jeden Voxel jeder
+    Struktur viermal (einmal pro Rotation) durch Python - beim Start des
+    Trainings war das der zweitgroesste Zeitfresser nach dem Blockdekodieren.
+
+    Gibt ``None`` zurueck, wenn die Struktur nur aus Luft besteht (das alte
+    ``trim_block_grid`` lieferte dafuer einen 1x1x1-Wuerfel).
+    """
+    sx, sy, sz = size
+    if sx <= 0 or sy <= 0 or sz <= 0:
+        return None
+    total = sx * sy * sz
+    if len(blocks) > total:
+        blocks = blocks[:total]
+
+    mask = np.fromiter((block != AIR for block in blocks), dtype=bool, count=len(blocks))
+    if mask.size < total:  # kuerzere Blockdaten als der Header verspricht
+        mask = np.concatenate([mask, np.zeros(total - mask.size, dtype=bool)])
+    if not mask.any():
+        return None
+
+    # _block_index(x, y, z) = y*sz*sx + z*sx + x  ->  [y][z][x]
+    grid = mask.reshape(sy, sz, sx)
+    y_min, y_max = _axis_bounds(grid.any(axis=(1, 2)))
+    z_min, z_max = _axis_bounds(grid.any(axis=(0, 2)))
+    x_min, x_max = _axis_bounds(grid.any(axis=(0, 1)))
+    return (x_min, y_min, z_min, x_max, y_max, z_max)
+
+
+def trimmed_block_size(schematic: SchematicData) -> tuple[int, int, int]:
+    """Kantenlaengen der getrimmten Struktur (1,1,1) fuer reine Luft."""
+    bounds = trimmed_block_bounds(schematic.blocks_important, schematic.size)
+    if bounds is None:
+        return (1, 1, 1)
+    x0, y0, z0, x1, y1, z1 = bounds
+    return (x1 - x0 + 1, y1 - y0 + 1, z1 - z0 + 1)
+
+
+def box_size_after_rotation(size: tuple[int, int, int], rotation: int) -> tuple[int, int, int]:
+    """Boxgroesse nach 90°-Schritten um Y (X und Z tauschen bei ungeraden Schritten).
+
+    Die Form der getrimmten Box ist rotationsinvariant: das Drehen des Inhalts
+    und anschliessende Trimmen ergibt genau die rotierte Box (die Extremwerte
+    entlang X/Z vertauschen sich), deshalb laesst sich die Groesse jeder
+    Rotation analytisch berechnen statt das Gitter zu rotieren.
+    """
+    sx, sy, sz = size
+    return (sz, sy, sx) if int(rotation) % 2 else (sx, sy, sz)
+
+
 def rotate_block_grid_y(grid: list[list[list[str]]], quarter_turns: int) -> list[list[list[str]]]:
     """Rotate a string block grid around Y in 90° steps, including block states."""
     quarter_turns %= 4
@@ -276,15 +391,16 @@ def legal_placement_transforms(
     Smaller buildings naturally receive more possible placements because they
     have more free space in the target grid. `diversity` controls how dense the
     sampled translation grid is.
+
+    Nur die getrimmte Bounding-Box wird ausgewertet (numpy-Scan), nicht das
+    komplette Gitter: fuer 3000+ Strukturen war das viermalige Rotieren des
+    Gitters in Python der Hauptteil der Trainings-Startzeit.
     """
-    base_grid = trim_block_grid(blocks_to_grid(schematic.blocks_important, schematic.size))
+    base_size = trimmed_block_size(schematic)
     transforms: list[PlacementTransform] = []
     seen: set[tuple[int, tuple[int, int, int], tuple[int, int, int]]] = set()
     for rotation in range(4):
-        rotated = rotate_block_grid_y(base_grid, rotation)
-        sx = len(rotated)
-        sy = len(rotated[0]) if sx else 0
-        sz = len(rotated[0][0]) if sx and sy else 0
+        sx, sy, sz = box_size_after_rotation(base_size, rotation)
         tx, ty, tz = target_size
         if sx > tx or sy > ty or sz > tz:
             continue
@@ -387,11 +503,11 @@ def extract_block_entities(nbt_root: Any) -> List[Dict[str, Any]]:
     entities = []
     block_entities_tag = None
 
-    if "BlockEntities" in nbt_root:
+    if _has_key(nbt_root, "BlockEntities"):
         block_entities_tag = nbt_root["BlockEntities"]
-    elif "Blocks" in nbt_root and "BlockEntities" in nbt_root["Blocks"]:
+    elif _has_key(nbt_root, "Blocks") and _has_key(nbt_root["Blocks"], "BlockEntities"):
         block_entities_tag = nbt_root["Blocks"]["BlockEntities"]
-    elif "palette" in nbt_root and "block_entities" in nbt_root:
+    elif _has_key(nbt_root, "palette") and _has_key(nbt_root, "block_entities"):
         block_entities_tag = nbt_root["block_entities"]
 
     if block_entities_tag is None:
@@ -437,6 +553,18 @@ def extract_block_entities(nbt_root: Any) -> List[Dict[str, Any]]:
             pass
     return entities
 
+def _has_key(tag: Any, key: str) -> bool:
+    """``key in tag`` - aber nur fuer Compound-artige Tags.
+
+    ``in`` auf Array-Tags (ByteArray/IntArray) landet in numpy: bei einem
+    Legacy-Schematic im MCEdit-Format ist ``root["Blocks"]`` ein ByteArray, und
+    ``"BlockEntities" in bytearray`` endet in
+    ``TypeError: iteration over a 0-d array``. Daran brach der Dataset-Aufbau
+    bei 'wutiao.schem' ab.
+    """
+    return isinstance(tag, dict) and key in tag
+
+
 def _compound_to_dict(comp: T.Compound) -> Dict[str, Any]:
     result = {}
     for raw_key in comp:
@@ -460,9 +588,9 @@ def extract_entities(nbt_root: Any) -> List[Dict[str, Any]]:
     """Extract Entities (not BlockEntities) from schematic NBT."""
     ents = []
     entities_tag = None
-    if "Entities" in nbt_root:
+    if _has_key(nbt_root, "Entities"):
         entities_tag = nbt_root["Entities"]
-    elif "entities" in nbt_root:
+    elif _has_key(nbt_root, "entities"):
         entities_tag = nbt_root["entities"]
     if entities_tag is None:
         return ents
@@ -498,27 +626,50 @@ class SchematicData:
     block_entities: list[dict] = field(default_factory=list)  # BlockEntity data
     entities: list[dict] = field(default_factory=list)  # Entity data
 
+    @property
+    def num_voxels(self) -> int:
+        return self.size[0] * self.size[1] * self.size[2]
+
     def __post_init__(self) -> None:
         if not self.blocks_important:
             object.__setattr__(self, "blocks_important", [keep_important_states(b) for b in self.blocks])
 
 
+class SchematicTooLarge(ValueError):
+    """Struktur ist groesser als das erlaubte Voxel-Limit.
+
+    Wird aus :func:`load_schematic` geworfen, *bevor* Palette und Blockdaten
+    dekodiert werden - siehe dort.
+    """
+
+    def __init__(self, path: "Path | str", size: tuple[int, int, int], max_voxels: int) -> None:
+        self.path = Path(path)
+        self.size = size
+        self.max_voxels = int(max_voxels)
+        self.num_voxels = size[0] * size[1] * size[2]
+        super().__init__(
+            f"{self.path.name}: {size[0]}x{size[1]}x{size[2]} = {self.num_voxels:,} Voxel "
+            f"ueberschreitet das Limit von {self.max_voxels:,} Voxel"
+        )
+
+
 def _unwrap_root(nbt_file: File):
     # Direct Schematic key
-    if "Schematic" in nbt_file and len(nbt_file) == 1:
+    if _has_key(nbt_file, "Schematic") and len(nbt_file) == 1:
         return nbt_file["Schematic"]
     # Handle wrapped format: {'': Compound({'Schematic': {...}})}
-    if "" in nbt_file:
+    if _has_key(nbt_file, ""):
         inner = nbt_file[""]
-        if "Schematic" in inner:
+        if _has_key(inner, "Schematic"):
             return inner["Schematic"]
     # Handle format where Schematic is one of multiple keys
-    if "Schematic" in nbt_file:
+    if _has_key(nbt_file, "Schematic"):
         return nbt_file["Schematic"]
     return nbt_file
 
 
 def _read_varints(raw: Iterable[int], expected: int) -> list[int]:
+    """Referenz-Implementierung (reines Python) fuer kleine/alte Formate."""
     values: list[int] = []
     value = 0
     shift = 0
@@ -540,6 +691,78 @@ def _read_varints(raw: Iterable[int], expected: int) -> list[int]:
     return values
 
 
+def _decode_palette_indices(raw, expected: int) -> "np.ndarray":
+    """LEB128-Varints vektorisiert dekodieren (gleiches Ergebnis wie _read_varints).
+
+    Der reine Python-Loop kostete fuer einen 400k-Voxel-Build ~0.3 s und war
+    damit der groesste Einzelposten beim Trainingsstart (alle Strukturen
+    zusammen mehrere Minuten). numpy erledigt dieselbe Arbeit in Millisekunden:
+
+      * ``ends``   = Position jedes Bytes ohne Continuation-Bit (Ende eines Werts)
+      * ``starts`` = jeweils ein Byte danach (abzueglich des Allererssten)
+      * Beitrag von Byte k = ``(byte & 0x7F) << (7*k)``
+
+    Faellt auf :func:`_read_varints` zurueck, wenn die Rohdaten nicht als
+    Byte-Array vorliegen.
+    """
+    try:
+        data = np.asarray(raw)
+        if data.dtype != np.uint8:
+            # nbtlib liefert int8-Arrays; negative Python-Bytes (-1 statt 255)
+            # werden erst im Array (still) umgebrochen, dann nach uint8.
+            data = data.astype(np.uint8, copy=False)
+        data = data.reshape(-1)
+    except (TypeError, ValueError, OverflowError):
+        return np.asarray(_read_varints(raw, expected), dtype=np.int64)
+
+    if data.size == 0:
+        if expected:
+            raise ValueError(f"Expected {expected} block ids, decoded 0")
+        return np.empty(0, dtype=np.int64)
+
+    continuation = (data & 0x80) != 0
+    ends = np.flatnonzero(~continuation)
+    count = int(ends.size)
+    if count == 0:
+        raise ValueError("Invalid varint in schematic block data")
+    starts = np.empty(count, dtype=np.int64)
+    starts[0] = 0
+    starts[1:] = ends[:-1] + 1
+    lengths = ends - starts + 1
+    if int(lengths.max()) > 6:
+        raise ValueError("Invalid varint in schematic block data")
+
+    values = np.zeros(count, dtype=np.int64)
+    for k in range(int(lengths.max())):
+        selected = lengths > k
+        values[selected] |= (data[starts[selected] + k].astype(np.int64) & 0x7F) << (7 * k)
+
+    if values.size < expected:
+        raise ValueError(f"Expected {expected} block ids, decoded {values.size}")
+    return values[:expected]
+
+
+def _blocks_from_palette(palette_index_to_name: dict[int, str], ids: "np.ndarray") -> list[str] | None:
+    """Blocknamen aus den Palette-Indizes ziehen (vektorisiert).
+
+    Die Palette enthaelt nur ein paar hundert Namen, deshalb werden die drei
+    Ausgabelisten ueber einen Gather auf dem Namens-Array gebildet statt mit
+    einem Python-Loop ueber alle Voxel. Gibt ``None`` zurueck, wenn ein Index
+    ausserhalb der Palette liegt (dann uebernimmt der alte Loop, der wie bisher
+    einen KeyError ausloest).
+    """
+    if ids.size == 0:
+        return []
+    if not palette_index_to_name:
+        return None  # leere Palette -> wie bisher ueber den Loop (KeyError)
+    if ids.min() < 0 or ids.max() >= max(palette_index_to_name) + 1:
+        return None
+    if max(palette_index_to_name) + 1 != len(palette_index_to_name):
+        return None  # lueckenhafte Palette -> konservativ ueber den Loop gehen
+    names = [palette_index_to_name[i] for i in range(len(palette_index_to_name))]
+    return np.asarray(names, dtype=object)[ids].tolist()
+
+
 def _write_varints(values: Iterable[int]) -> list[int]:
     encoded: list[int] = []
     for value in values:
@@ -555,7 +778,28 @@ def _write_varints(values: Iterable[int]) -> list[int]:
     return encoded
 
 
-def load_schematic(path: str | Path) -> SchematicData:
+def read_schematic_size(path: str | Path) -> tuple[int, int, int]:
+    """Nur Width/Height/Length lesen - ohne Palette/Blockdaten zu dekodieren.
+
+    Fuer die Groessenpruefung (max_voxels) reicht der NBT-Header: das Parsen
+    eines 281-Millionen-Voxel-Builds dauert ~0.1 s, das Dekodieren der Bloecke
+    dagegen Minuten und mehrere GB RAM.
+    """
+    path = Path(path)
+    root = _unwrap_root(File.load(path, gzipped=True))
+    if not all(_has_key(root, key) for key in ("Width", "Height", "Length")):
+        raise ValueError(f"Unsupported schematic format: {path}")
+    return int(root["Width"]), int(root["Height"]), int(root["Length"])
+
+
+def load_schematic(path: str | Path, max_voxels: int | None = None) -> SchematicData:
+    """Schematic laden und in Blocknamen-Listen umwandeln.
+
+    ``max_voxels`` prueft die Groesse anhand des Headers *vor* dem Dekodieren.
+    Zu grosse Strukturen werfen :class:`SchematicTooLarge` statt den Speicher zu
+    sprengen: Builds mit >100 Mio. Voxeln wuerden beim Dekodieren dreistellige
+    GB anfordern (drei String-Listen mit je einem Eintrag pro Voxel).
+    """
     path = Path(path)
     root = _unwrap_root(File.load(path, gzipped=True))
 
@@ -566,73 +810,64 @@ def load_schematic(path: str | Path) -> SchematicData:
     palette_raw = None
     block_data_raw = None
 
-    if "Blocks" in root and "Palette" in root["Blocks"]:
+    if _has_key(root, "Blocks") and _has_key(root["Blocks"], "Palette"):
         # Sponge v3 with nested Blocks compound
         palette_raw = {int(v): str(k) for k, v in root["Blocks"]["Palette"].items()}
         block_data_raw = root["Blocks"]["Data"]
         width = int(root["Width"])
         height = int(root["Height"])
         length = int(root["Length"])
-    elif "Palette" in root and "BlockData" in root:
+    elif _has_key(root, "Palette") and _has_key(root, "BlockData"):
         # Sponge v2 with flat palette
         palette_raw = {int(v): str(k) for k, v in root["Palette"].items()}
         block_data_raw = root["BlockData"]
         width = int(root["Width"])
         height = int(root["Height"])
         length = int(root["Length"])
-    elif "Blocks" in root:
+    elif _has_key(root, "Blocks"):
         # Legacy format
         width = int(root["Width"])
         height = int(root["Height"])
         length = int(root["Length"])
+        size = (width, height, length)
+        if max_voxels is not None and width * height * length > max_voxels:
+            raise SchematicTooLarge(path, size, max_voxels)
         blocks_raw = [f"legacy:{int(v) & 0xFF}" for v in root["Blocks"]]
         blocks_stripped = [strip_block_state(b) for b in blocks_raw]
         blocks_important = [keep_important_states(b) for b in blocks_raw]
-        return SchematicData(blocks_raw, blocks_stripped, blocks_important, (width, height, length),
+        return SchematicData(blocks_raw, blocks_stripped, blocks_important, size,
                            block_entities, entities)
     else:
         raise ValueError(f"Unsupported schematic format: {path}")
 
-    ids = _read_varints(block_data_raw, width * height * length)
-    blocks_raw = [palette_raw[i] for i in ids]
+    size = (width, height, length)
+    if max_voxels is not None and width * height * length > max_voxels:
+        # Abbrechen, bevor eine einzige Blockzeile materialisiert wird.
+        raise SchematicTooLarge(path, size, max_voxels)
+
+    ids = _decode_palette_indices(block_data_raw, width * height * length)
+    blocks_raw = _blocks_from_palette(palette_raw, ids)
+    if blocks_raw is None:
+        # Palette inkonsistent (Index ausserhalb) - wie bisher per KeyError/Loop.
+        raw_ids = ids.tolist()
+        blocks_raw = [palette_raw[i] for i in raw_ids]
     blocks_stripped = [strip_block_state(b) for b in blocks_raw]
     blocks_important = [keep_important_states(b) for b in blocks_raw]
-    return SchematicData(blocks_raw, blocks_stripped, blocks_important, (width, height, length),
+    return SchematicData(blocks_raw, blocks_stripped, blocks_important, size,
                        block_entities, entities)
 
 
-def _swap_east_west_north_south(block_name: str) -> str:
-    """Swap east<->west and north<->south in block state values within a block name."""
-    if "[" not in block_name:
-        return block_name
-    base, states_str = block_name.split("[", 1)
-    states_str = states_str.rstrip("]")
-    pairs = states_str.split(",")
-    swapped_pairs = []
-    for pair in pairs:
-        if "=" in pair:
-            key, value = pair.split("=", 1)
-            if key == "facing" or key in ("east", "west", "north", "south"):
-                if value == "east":
-                    value = "west"
-                elif value == "west":
-                    value = "east"
-                elif value == "north":
-                    value = "south"
-                elif value == "south":
-                    value = "north"
-            swapped_pairs.append(f"{key}={value}")
-        else:
-            swapped_pairs.append(pair)
-    return f"{base}[{','.join(swapped_pairs)}]"
-
-
 def save_schem(path: str | Path, token_grid: torch.Tensor, id_to_block: list[str],
-               block_entities: list[dict] | None = None,
-               swap_directions: bool = False) -> int:
+               block_entities: list[dict] | None = None) -> int:
     """Save a schematic using nbtlib with correct Sponge v3 format.
     Manually gzips to work around nbtlib v1.12.1 gzip bug.
-    Returns the number of blocks that were converted to air due to out-of-range IDs."""
+    Returns the number of blocks that were converted to air due to out-of-range IDs.
+
+    The grid is written exactly as passed in - no block states are mirrored or
+    swapped here, so every caller (CLI, project save, export) produces the same
+    orientation. (An earlier version had a ``swap_directions`` flag that was only
+    used by the GUI export button and silently mirrored east/west and north/south.)
+    """
     import gzip as gzip_mod
     import io
 
@@ -673,12 +908,10 @@ def save_schem(path: str | Path, token_grid: torch.Tensor, id_to_block: list[str
     if AIR not in palette_blocks:
         palette_blocks.insert(0, AIR)
 
-    # Richtungen tauschen (east<->west, north<->south) wenn gewünscht
-    if swap_directions:
-        palette_blocks = [_swap_east_west_north_south(b) for b in palette_blocks]
-        # Air in der Palette belassen (swap sollte air nicht ändern, aber sicherheitshalber)
-        if AIR not in palette_blocks:
-            palette_blocks.insert(0, AIR)
+    # Name -> Palette-Index (erste Fundstelle gewinnt) - vermeidet O(n²) Suchen
+    palette_index: dict[str, int] = {}
+    for index, block in enumerate(palette_blocks):
+        palette_index.setdefault(block, index)
 
     # Konvertiere Grid in lineare ID-Liste (Y, Z, X Reihenfolge wie Sponge v3)
     block_ids: list[int] = []
@@ -686,21 +919,18 @@ def save_schem(path: str | Path, token_grid: torch.Tensor, id_to_block: list[str
         for z in range(length):
             for x in range(width):
                 tid = int(grid[x, y, z])
+                block_name = None
                 if 0 <= tid < vocab_size:
                     block_name = id_to_block[tid]
-                else:
+                if not isinstance(block_name, str):
+                    # out-of-range ID oder Lücke in der Vokabel -> air
                     block_name = AIR
-                if swap_directions:
-                    block_name = _swap_east_west_north_south(block_name)
-                if block_name in palette_blocks:
-                    block_ids.append(palette_blocks.index(block_name))
-                else:
-                    block_ids.append(0)
+                block_ids.append(palette_index.get(block_name, palette_index[AIR]))
 
     # Baue das Schematic mit nbtlib
     palette_compound = T.Compound({})
     for block in palette_blocks:
-        palette_compound[block] = T.Int(palette_blocks.index(block))
+        palette_compound[block] = T.Int(palette_index[block])
 
     import numpy as np
     # Data als ByteArray mit varint-kodierten Werten
@@ -796,37 +1026,62 @@ class VoxelTokenizer:
             if idx >= len(self.id_to_block):
                 self.id_to_block.extend([AIR] * (idx + 1 - len(self.id_to_block)))
             self.id_to_block[idx] = block
+        self.reset()
 
     @property
     def vocab_size(self) -> int:
         return len(self.id_to_block)
 
-    def fit(self, schematics: Iterable[SchematicData], target_size: tuple[int, int, int]) -> None:
+    def fit(self, schematics: Iterable[SchematicData],
+            target_size: tuple[int, int, int] | None = None) -> None:
         """Build vocabulary from ALL block names across ALL schematics,
         keeping only important block states.
+
+        ``target_size`` wird nur aus Kompatibilitaet akzeptiert und nicht benoetigt.
         """
-        blocks = {AIR}
+        self.reset()
+        for schematic in schematics:
+            self.observe(schematic)
+        self.finalize()
+
+    def reset(self) -> None:
+        """Vokabel-Sammlung leeren (siehe :meth:`observe` / :meth:`finalize`)."""
+        self._vocab_names: set[str] = {AIR}
         self.block_entity_types: set[str] = set()
 
-        for schematic in schematics:
+    def observe(self, schematic: SchematicData) -> None:
+        """Blocknamen + BlockEntity-Typen *einer* Struktur einsammeln.
+
+        Statt das Gitter viermal zu rotieren und jeden einzelnen Voxel durch
+        Python zu schicken, werden nur die eindeutigen Blocknamen gedreht: die
+        Rotation aendert ausschliesslich den Namen (facing/axis/rotation), nie
+        die Menge der Namen im Gitter. Ergebnis ist identisch, der Aufwand
+        sinkt von "alle Voxel" auf "alle Blocktypen".
+        """
+        vocab = getattr(self, "_vocab_names", None)
+        if vocab is None:
+            self.reset()
+            vocab = self._vocab_names
+
+        for name in set(schematic.blocks_important):
             # Include all rotated states so stairs, logs, shelves/signs etc. do
             # not disappear when augmented rotations create new orientations.
-            base_grid = trim_block_grid(blocks_to_grid(schematic.blocks_important, schematic.size))
             for rotation in range(4):
-                rotated = rotate_block_grid_y(base_grid, rotation)
-                rotated_blocks, _ = grid_to_blocks(rotated)
-                blocks.update(keep_important_states(block) for block in rotated_blocks)
+                vocab.add(keep_important_states(rotate_block_state_y(name, rotation)))
 
-            # Track which blocks have BlockEntities
-            for be in schematic.block_entities:
-                block_id = be.get("id", "")
-                base = strip_block_state(block_id)
-                self.block_entity_types.add(base)
+        # Track which blocks have BlockEntities
+        for be in schematic.block_entities:
+            self.block_entity_types.add(strip_block_state(be.get("id", "")))
 
+    def finalize(self) -> None:
+        """``block_to_id`` / ``id_to_block`` aus den gesammelten Namen bauen."""
+        names = getattr(self, "_vocab_names", {AIR})
         self.block_to_id = {AIR: 0}
-        for block in sorted(blocks - {AIR}):
+        for block in sorted(names - {AIR}):
             self.block_to_id[block] = len(self.block_to_id)
-        self.id_to_block = [None] * len(self.block_to_id)
+        # Mit AIR vorbelegen statt mit None: Lücken/None wuerden sonst als
+        # Blockname "None" in die Palette wandern.
+        self.id_to_block = [AIR] * len(self.block_to_id)
         for block, idx in self.block_to_id.items():
             self.id_to_block[idx] = block
 
@@ -938,47 +1193,133 @@ class PromptTokenizer:
         return cls(payload["token_to_id"], int(payload["max_length"]))
 
 
-def discover_examples(data_dir: str | Path) -> list[tuple[Path, str]]:
-    """Discover all (schematic_path, prompt) pairs in a directory.
+def _normalize_prompts(value: Any) -> List[str]:
+    """One prompts.json value -> list of prompts.
 
-    For .txt files with multiple prompts separated by '---', each prompt
-    generates its own training example (all mapping to the same schematic).
-    Lines after '---' that look like metadata (starting with 'source:', 'aug:',
-    etc.) are filtered out and not treated as prompts.
+    A value may be a single prompt or a list of prompts for the same structure
+    (e.g. name + description); every entry becomes its own training example.
+    """
+    if isinstance(value, str):
+        values: Iterable[Any] = (value,)
+    elif isinstance(value, (list, tuple)):
+        values = value
+    else:
+        return []
+    return [text for text in (str(item).strip() for item in values) if text]
+
+
+def _load_prompt_map(directory: Path) -> Dict[str, List[str]]:
+    """Read prompts.json of a directory (empty dict if missing/invalid)."""
+    prompt_map_path = directory / "prompts.json"
+    if not prompt_map_path.exists():
+        return {}
+    try:
+        data = json.loads(prompt_map_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"Warnung: prompts.json in {directory} konnte nicht gelesen werden ({exc})")
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    prompt_map: Dict[str, List[str]] = {}
+    for key, value in data.items():
+        prompts = _normalize_prompts(value)
+        if prompts:
+            prompt_map[str(key)] = prompts
+    return prompt_map
+
+
+def iter_schematic_files(data_dir: str | Path) -> List[Path]:
+    """All .schem/.schematic files below a directory (recursive).
+
+    Recursive discovery means nested layouts work as well, e.g. data sets split
+    into ``<category>/`` sub folders (scrape_phantommarket.py --split-by-category).
+    """
+    root = Path(data_dir)
+    if not root.is_dir():
+        return []
+    return sorted(
+        path for path in root.rglob("*")
+        if path.is_file() and path.suffix.lower() in SCHEM_EXTENSIONS
+    )
+
+
+def discover_examples(data_dir: str | Path) -> list[tuple[Path, str]]:
+    """Discover all (schematic_path, prompt) pairs in a directory (recursive).
+
+    Prompt source order: ``prompts.json`` (own folder, then the data dir root),
+    otherwise a ``.txt`` sidecar. A prompt map entry may hold a single prompt or
+    a list of prompts for the same structure (e.g. name + description); a .txt
+    file with multiple prompts separated by '---' produces one training example
+    per prompt as well. Lines of legacy metadata sections (source:, aug:, ...)
+    are filtered out.
+
+    Missing directories are skipped instead of raising FileNotFoundError.
     """
     data_dir = Path(data_dir)
-    prompt_map_path = data_dir / "prompts.json"
-    prompt_map = {}
-    if prompt_map_path.exists():
-        prompt_map = json.loads(prompt_map_path.read_text(encoding="utf-8"))
+    prompt_maps: Dict[Path, Dict[str, List[str]]] = {}
 
-    META_PREFIXES = ("source:", "aug:", "author:", "name:", "url:", "id:")
+    def prompt_map_for(directory: Path) -> Dict[str, List[str]]:
+        if directory not in prompt_maps:
+            prompt_maps[directory] = _load_prompt_map(directory)
+        return prompt_maps[directory]
 
     examples: list[tuple[Path, str]] = []
-    for schem_path in sorted(data_dir.iterdir()):
-        if schem_path.suffix.lower() not in SCHEM_EXTENSIONS:
-            continue
-        prompt = prompt_map.get(schem_path.name) or prompt_map.get(schem_path.stem)
-        if prompt:
-            examples.append((schem_path, prompt))
+    for schem_path in iter_schematic_files(data_dir):
+        prompts: List[str] = []
+        for directory in (schem_path.parent, data_dir):
+            mapping = prompt_map_for(directory)
+            prompts = mapping.get(schem_path.name) or mapping.get(schem_path.stem) or []
+            if prompts:
+                break
+        if prompts:
+            examples.extend((schem_path, prompt) for prompt in prompts)
             continue
 
         txt_path = schem_path.with_suffix(".txt")
         if not txt_path.exists():
             continue
-
-        raw = txt_path.read_text(encoding="utf-8")
-        # Split on '---' to get all prompt candidates
-        parts = [p.strip() for p in raw.split("---")]
-        for part in parts:
-            if not part:
-                continue
-            # Skip metadata lines (source: ..., aug: ...)
-            if any(part.lower().startswith(prefix) for prefix in META_PREFIXES):
-                continue
+        try:
+            raw = txt_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"Warnung: {txt_path} konnte nicht gelesen werden ({exc})")
+            continue
+        for part in split_prompt_text(raw):
             examples.append((schem_path, part))
 
     return examples
+
+
+def discover_prompt_files(data_dirs: Iterable[str | Path]) -> Tuple[List[Path], List[Path]]:
+    """Return (schem_files, txt_files) for all structures with a usable prompt sidecar.
+
+    Used by the hidden state cache so that validation and dataset discovery look
+    at exactly the same structures. Structures whose prompt comes from
+    ``prompts.json`` (without a .txt sidecar) cannot be cached and are therefore
+    not part of this list.
+    """
+    schem_files: List[Path] = []
+    txt_files: List[Path] = []
+    seen: set[Path] = set()
+    for data_dir in data_dirs:
+        for schem_path in iter_schematic_files(data_dir):
+            txt_path = schem_path.with_suffix(".txt")
+            if not txt_path.exists():
+                continue
+            try:
+                resolved = schem_path.resolve()
+            except OSError:
+                resolved = schem_path
+            if resolved in seen:
+                continue
+            try:
+                if not split_prompt_text(txt_path.read_text(encoding="utf-8")):
+                    continue
+            except OSError:
+                continue
+            seen.add(resolved)
+            schem_files.append(schem_path)
+            txt_files.append(txt_path)
+    return schem_files, txt_files
 
 
 def discover_examples_many(data_dirs: Iterable[str | Path]) -> list[tuple[Path, str, Path]]:
@@ -1000,6 +1341,110 @@ class AugmentedSchematicExample:
     transform: PlacementTransform
 
 
+# Decodierte Schematics, die im Arbeitsspeicher gehalten werden duerfen. Eine
+# dekodierte Struktur kostet grob 25-30 Byte pro Voxel (drei Listen voller
+# Zeiger pro Voxel), 6 Mio. Voxel entsprechen also ca. 150-200 MB.
+DEFAULT_SCHEMATIC_CACHE_VOXELS = int(
+    os.environ.get("MINECRAFT_AI_SCHEMATIC_CACHE_VOXELS", str(6_000_000)))
+
+
+class LazySchematicStore(Sequence):
+    """Laedt Schematics bei Bedarf und haelt nur das angegebene Voxel-Budget im RAM.
+
+    Vorher hat das Dataset beim Start JEDE Struktur geladen und behalten. Bei
+    mehreren tausend Strukturen plus einigen sehr grossen Builds war das einer
+    der Hauptgruende fuer den hohen Speicherverbrauch (ein einzelner
+    1000x1000-Build sprengt den Rahmen alleine). Ausgewertet wird jede Struktur
+    beim Start einmal (Bounding-Box + Blocktypen); danach entscheidet das
+    Budget, was im Cache bleibt.
+
+    Die Anzahl der gecachten Strukturen ergibt sich aus dem Voxel-Budget, damit
+    grosse Builds den Cache schneller fuellen als kleine.
+    """
+
+    def __init__(self, max_voxels: int | None = None,
+                 cache_voxels: int = DEFAULT_SCHEMATIC_CACHE_VOXELS,
+                 max_entries: int = 8192):
+        self._paths: list[Path] = []
+        self._cache: "OrderedDict[int, SchematicData]" = OrderedDict()
+        self._voxels_by_index: dict[int, int] = {}
+        self._cached_voxels = 0
+        self.max_voxels = max_voxels
+        self.cache_voxels = max(0, int(cache_voxels))
+        self.max_entries = max(1, int(max_entries))
+        self.load_count = 0
+
+    # ─── Sequence-API (ersetzt die frühere Liste) ───
+    def __len__(self) -> int:
+        return len(self._paths)
+
+    def __getitem__(self, index: int) -> SchematicData:
+        if isinstance(index, slice):
+            return [self[i] for i in range(*index.indices(len(self._paths)))]
+        if index < 0:
+            index += len(self._paths)
+        if index < 0 or index >= len(self._paths):
+            raise IndexError(
+                f"Schematic-Index {index} ausserhalb von 0..{len(self._paths) - 1}")
+        cached = self._cache.get(index)
+        if cached is not None:
+            self._cache.move_to_end(index)
+            return cached
+        schematic = load_schematic(self._paths[index], max_voxels=self.max_voxels)
+        self._store(index, schematic)
+        return schematic
+
+    def __iter__(self) -> Iterator[SchematicData]:
+        for index in range(len(self._paths)):
+            yield self[index]
+
+    # ─── Verwaltung ───
+    def path(self, index: int) -> Path:
+        return self._paths[index]
+
+    def add(self, path: Path, schematic: SchematicData | None = None) -> int:
+        """Pfad registrieren und seinen Index zurückgeben.
+
+        ``schematic`` wird direkt uebernommen (statt beim ersten Zugriff erneut
+        von der Platte zu lesen); ohne Angabe laedt ``__getitem__`` bei Bedarf.
+        """
+        self._paths.append(Path(path))
+        index = len(self._paths) - 1
+        if schematic is not None:
+            self._store(index, schematic)
+        return index
+
+    def release(self, index: int) -> None:
+        """Struktur sofort aus dem Cache werfen."""
+        voxels = self._voxels_by_index.pop(index, None)
+        if voxels is not None:
+            self._cached_voxels -= voxels
+            self._cache.pop(index, None)
+
+    def clear(self) -> None:
+        self._cache.clear()
+        self._voxels_by_index.clear()
+        self._cached_voxels = 0
+
+    @property
+    def cached_voxels(self) -> int:
+        return self._cached_voxels
+
+    def _store(self, index: int, schematic: SchematicData) -> None:
+        self.load_count += 1
+        voxels = max(1, int(schematic.num_voxels))
+        if self.cache_voxels <= 0 or voxels > self.cache_voxels:
+            return  # Budget aus oder einzelne Struktur zu gross
+        self._cache[index] = schematic
+        self._voxels_by_index[index] = voxels
+        self._cached_voxels += voxels
+        self._cache.move_to_end(index)
+        while (self._cached_voxels > self.cache_voxels or len(self._cache) > self.max_entries) \
+                and len(self._cache) > 1:
+            old_index, _ = self._cache.popitem(last=False)
+            self._cached_voxels -= self._voxels_by_index.pop(old_index, 0)
+
+
 class MultiSourceSchematicDataset(Dataset):
     def __init__(self, data_dirs: Iterable[str | Path],
                  target_size: tuple[int, int, int] = (16, 16, 16),
@@ -1013,52 +1458,76 @@ class MultiSourceSchematicDataset(Dataset):
                  air_weight_factor: float = 75.0,
                  hidden_states: torch.Tensor | None = None,
                  attention_masks: torch.Tensor | None = None,
-                 hidden_index: list[int] | None = None):
+                 hidden_index: list[int] | None = None,
+                 hidden_lengths: torch.Tensor | None = None,
+                 encoded_cache_size: int = 1024,
+                 schematic_cache_voxels: int = DEFAULT_SCHEMATIC_CACHE_VOXELS,
+                 progress_callback: Callable[[int, int], None] | None = None):
         self.structure_block_weight = max(1.0, float(structure_block_weight))
         self.air_weight_factor = max(1.0, float(air_weight_factor))
-        self.hidden_states = hidden_states
-        self.attention_masks = attention_masks
+        self._set_hidden_states(hidden_states, attention_masks, hidden_lengths)
         self.hidden_index = hidden_index  # maps each example to a row index in hidden_states
         raw_examples = discover_examples_many(data_dirs)
         if not raw_examples:
             raise ValueError("No .schem/.schematic examples with prompts found")
+        total_examples = len(raw_examples)
 
         self.examples: list[AugmentedSchematicExample] = []
-        self.schematics: list[SchematicData] = []
+        self.schematics = LazySchematicStore(
+            max_voxels=max_voxels, cache_voxels=schematic_cache_voxels)
         self._schematic_by_path: dict[Path, int] = {}
-        self._transforms_by_path: dict[Path, list[PlacementTransform]] = {}
+        self._transform_by_path: dict[Path, list[PlacementTransform]] = {}
         self._category_by_path: dict[Path, int] = {}
         self.skipped_examples: list[Path] = []
+        self._oversize_paths: set[Path] = set()
+        self.oversize_voxels = 0
 
-        for path, prompt, source_dir in raw_examples:
+        # Vokabular im selben Durchgang sammeln statt in einem zweiten Durchlauf
+        # ueber alle Strukturen (siehe VoxelTokenizer.observe()).
+        build_tokenizer = voxel_tokenizer is None
+        self.voxel_tokenizer = VoxelTokenizer() if build_tokenizer else voxel_tokenizer
+        if build_tokenizer:
+            self.voxel_tokenizer.reset()
+
+        for processed, (path, prompt, source_dir) in enumerate(raw_examples, start=1):
+            if progress_callback and (processed % 25 == 0 or processed == total_examples):
+                # Der Aufbau laeuft minutenlang (eine Struktur pro Ladevorgang),
+                # ohne Rueckmeldung sieht der Nutzer nur ein "haengendes" Training.
+                progress_callback(processed, total_examples)
+
             resolved = path.resolve()
-            if resolved in self._schematic_by_path:
-                schematic_index = self._schematic_by_path[resolved]
-                schematic = self.schematics[schematic_index]
-            else:
-                schematic = load_schematic(path)
-                schematic_index = len(self.schematics)
-                self.schematics.append(schematic)
-                self._schematic_by_path[resolved] = schematic_index
-
-            voxels = schematic.size[0] * schematic.size[1] * schematic.size[2]
-            if max_voxels is not None and voxels > max_voxels:
+            if resolved in self._oversize_paths:
                 self.skipped_examples.append(path)
                 continue
 
-            if resolved not in self._transforms_by_path:
+            schematic_index = self._schematic_by_path.get(resolved)
+            if schematic_index is None:
+                try:
+                    # Laedt die Struktur und prueft die Groesse anhand des
+                    # Headers, bevor Palette/Blockdaten dekodiert werden.
+                    schematic = load_schematic(path, max_voxels=max_voxels)
+                except SchematicTooLarge as exc:
+                    self._oversize_paths.add(resolved)
+                    self.oversize_voxels += exc.num_voxels
+                    self.skipped_examples.append(path)
+                    continue
+                schematic_index = self.schematics.add(path, schematic)
+                self._schematic_by_path[resolved] = schematic_index
+                if build_tokenizer:
+                    self.voxel_tokenizer.observe(schematic)
+            else:
+                schematic = self.schematics[schematic_index]
+
+            transforms = self._transform_by_path.get(resolved)
+            if transforms is None:
                 if augmentation_diversity <= 0:
-                    base_grid = trim_block_grid(blocks_to_grid(schematic.blocks_important, schematic.size))
-                    sx = len(base_grid)
-                    sy = len(base_grid[0]) if sx else 0
-                    sz = len(base_grid[0][0]) if sx and sy else 0
+                    sx, sy, sz = trimmed_block_size(schematic)
                     tx, ty, tz = target_size
                     if sx <= tx and sy <= ty and sz <= tz:
-                        transform = PlacementTransform(
+                        transforms = [PlacementTransform(
                             rotation=0,
                             offset=((tx - sx) // 2, 0, (tz - sz) // 2),
-                        )
-                        transforms = [transform]
+                        )]
                     else:
                         transforms = []
                 else:
@@ -1069,9 +1538,8 @@ class MultiSourceSchematicDataset(Dataset):
                         allow_vertical_movement=allow_vertical_movement,
                         max_variants=max_augmented_variants,
                     )
-                self._transforms_by_path[resolved] = transforms
+                self._transform_by_path[resolved] = transforms
 
-            transforms = self._transforms_by_path[resolved]
             if not transforms:
                 self.skipped_examples.append(path)
                 continue
@@ -1096,13 +1564,20 @@ class MultiSourceSchematicDataset(Dataset):
         self.target_size = target_size
         self.augmentation_diversity = int(augmentation_diversity)
         self.allow_vertical_movement = bool(allow_vertical_movement)
-        self.prompt_tokenizer = prompt_tokenizer or PromptTokenizer()
         if prompt_tokenizer is None:
+            self.prompt_tokenizer = PromptTokenizer()
             self.prompt_tokenizer.fit(example.prompt for example in self.examples)
+        else:
+            self.prompt_tokenizer = prompt_tokenizer
 
-        self.voxel_tokenizer = voxel_tokenizer or VoxelTokenizer()
-        if voxel_tokenizer is None:
-            self.voxel_tokenizer.fit(self.schematics, target_size)
+        if build_tokenizer:
+            self.voxel_tokenizer.finalize()
+
+        # LRU cache for encoded/placed grids. Rotation + trim + placement of the
+        # source grid is the expensive part of __getitem__ and every augmentated
+        # variant is requested once per epoch again.
+        self.max_encoded_cache = int(encoded_cache_size)
+        self._encoded_cache: "OrderedDict[tuple[int, PlacementTransform], torch.Tensor]" = OrderedDict()
 
         category_counts: dict[int, int] = {}
         for example in self.examples:
@@ -1116,8 +1591,14 @@ class MultiSourceSchematicDataset(Dataset):
     def __len__(self) -> int:
         return len(self.examples)
 
-    def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
-        example = self.examples[index]
+    def _encode_example(self, example: AugmentedSchematicExample) -> torch.Tensor:
+        """Encode one example to block IDs, cached per (structure, transform)."""
+        key = (example.schematic_index, example.transform)
+        cached = self._encoded_cache.get(key)
+        if cached is not None:
+            self._encoded_cache.move_to_end(key)
+            return cached
+
         schematic = self.schematics[example.schematic_index]
         transformed_blocks = transform_blocks_to_size(
             schematic,
@@ -1126,7 +1607,59 @@ class MultiSourceSchematicDataset(Dataset):
         )
         voxel_ids = self.voxel_tokenizer.safe_encode_prepared_blocks(
             transformed_blocks, self.target_size)
-        
+
+        if self.max_encoded_cache > 0:
+            self._encoded_cache[key] = voxel_ids
+            while len(self._encoded_cache) > self.max_encoded_cache:
+                self._encoded_cache.popitem(last=False)
+        return voxel_ids
+
+    def _set_hidden_states(self, hidden_states: torch.Tensor | None,
+                           attention_masks: torch.Tensor | None,
+                           lengths: torch.Tensor | None = None) -> None:
+        """Normalise the text context cache to the flat ("ragged") layout.
+
+        Rows are concatenated along the token axis; the start offset of row i is
+        the cumulative sum of the row lengths. Storing the context unpadded is
+        what keeps the cache small: padding every row to the longest prompt of
+        the data set cost ~20 GB for ~6400 prompts with hidden_dim=3072 (see
+        app/hidden_state_cache.py). Padding to the longest row of a batch happens
+        in collate_context_batch().
+        """
+        if hidden_states is None:
+            self.hidden_states = None
+            self.attention_masks = None
+            self.hidden_lengths = None
+            self.hidden_offsets = None
+            return
+
+        if hidden_states.dim() == 3:  # legacy padded cache [N, seq_len, hidden_dim]
+            masks = attention_masks
+            if masks is None:
+                masks = torch.ones(list(hidden_states.shape[:2]), dtype=torch.long)
+            lengths = masks.reshape(masks.shape[0], -1).sum(dim=1).to(torch.long)
+            hidden_states = torch.cat(
+                [hidden_states[i, :int(lengths[i])] for i in range(hidden_states.shape[0])], dim=0)
+            attention_masks = torch.ones(int(lengths.sum()), dtype=torch.long)
+
+        if lengths is None:
+            raise ValueError(
+                "Fuer einen flachen Hidden-State-Cache werden die Zeilenlaengen "
+                "benoetigt (load_hidden_states_raw liefert sie).")
+        lengths = lengths.to(torch.long).reshape(-1)
+        if attention_masks is None:
+            attention_masks = torch.ones(int(hidden_states.shape[0]), dtype=torch.long)
+
+        self.hidden_states = hidden_states.reshape(-1, hidden_states.shape[-1])
+        self.attention_masks = attention_masks.reshape(-1)
+        self.hidden_lengths = lengths
+        # offsets[i] = first token of row i, offsets[num_rows] = total tokens
+        self.hidden_offsets = torch.cat([torch.zeros(1, dtype=torch.long), lengths.cumsum(0)])
+
+    def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
+        example = self.examples[index]
+        voxel_ids = self._encode_example(example)
+
         # ── Per-structure adaptive weight ──
         # Berechne pro-token Gewichte:
         #   block_weight = structure_block_weight / (non_air_count + eps)
@@ -1136,11 +1669,11 @@ class MultiSourceSchematicDataset(Dataset):
         total_tokens = voxel_ids.numel()
         non_air_count = int((voxel_ids != 0).sum().item())
         air_count = total_tokens - non_air_count
-        
+
         eps = 0.001
-        self._per_block_weight_cache = self.structure_block_weight / (non_air_count + eps)
-        self._per_air_weight_cache = self.air_weight_factor / (air_count + eps)
-        
+        per_block_weight = self.structure_block_weight / (non_air_count + eps)
+        per_air_weight = self.air_weight_factor / (air_count + eps)
+
         result = {
             "prompt_ids": self.prompt_tokenizer.encode(example.prompt),
             "prompt_text": example.prompt,  # Raw text for pre-trained transformer encoders
@@ -1148,24 +1681,21 @@ class MultiSourceSchematicDataset(Dataset):
             "source_index": torch.tensor(index, dtype=torch.long),
             "category_index": torch.tensor(example.category_index, dtype=torch.long),
             "sample_weight": torch.tensor(self._sample_weights[index], dtype=torch.float32),
-            "per_block_weight": torch.tensor(self._per_block_weight_cache, dtype=torch.float32),
-            "per_air_weight": torch.tensor(self._per_air_weight_cache, dtype=torch.float32),
+            "per_block_weight": torch.tensor(per_block_weight, dtype=torch.float32),
+            "per_air_weight": torch.tensor(per_air_weight, dtype=torch.float32),
         }
 
-        # Add pre-computed hidden states if available
+        # Add pre-computed hidden states if available. Rows are stored unpadded
+        # (see _set_hidden_states); the batch padding happens in
+        # collate_context_batch(), not here.
         if self.hidden_states is not None and self.hidden_index is not None:
             hs_idx = self.hidden_index[index]
-            result["hidden_states"] = self.hidden_states[hs_idx]
-            result["attention_masks"] = self.attention_masks[hs_idx]
+            start = int(self.hidden_offsets[hs_idx])
+            end = start + int(self.hidden_lengths[hs_idx])
+            result["hidden_states"] = self.hidden_states[start:end]
+            result["attention_masks"] = self.attention_masks[start:end]
 
         return result
-
-    def source_weights(self, priority_dirs: Iterable[str | Path], priority_weight: float) -> torch.Tensor:
-        priority = {Path(path).resolve() for path in priority_dirs}
-        weights = []
-        for example in self.examples:
-            weights.append(priority_weight if example.source_dir.resolve() in priority else 1.0)
-        return torch.tensor(weights, dtype=torch.double)
 
     @classmethod
     def with_cache(
@@ -1183,8 +1713,9 @@ class MultiSourceSchematicDataset(Dataset):
         """
         from app.hidden_state_cache import load_hidden_states_raw
         cache_data = load_hidden_states_raw(cache_dir)
-        hidden_states = cache_data["hidden_states"]       # [N, seq_len, hidden_dim]
-        attention_masks = cache_data["attention_masks"]    # [N, seq_len]
+        hidden_states = cache_data["hidden_states"]      # flat [total_tokens, hidden_dim]
+        attention_masks = cache_data["attention_masks"]  # flat [total_tokens]
+        hidden_lengths = cache_data["lengths"]           # [num_prompts] tokens per row
         cache_metadata = cache_data["metadata"]
         cache_files_list = cache_metadata.get("files", [])
 
@@ -1197,14 +1728,24 @@ class MultiSourceSchematicDataset(Dataset):
         # Build dataset first (will create examples)
         dataset = cls(data_dirs, target_size=target_size, **kwargs)
 
-        # Build hidden_index: for each example, find matching cache row
-        # We need to track prompt_index per schem file as we iterate examples
-        prompt_counter: dict[str, int] = {}
+        # Build hidden_index: for each example, find the matching cache row.
+        #
+        # The prompt index must be counted per (schematic file, prompt), NOT per
+        # generated example: a structure with 2 prompts and 64 placement variants
+        # produces 128 examples, but only 2 cache rows. The previous per-example
+        # counter assigned cache rows of *other* prompts to augmented variants and
+        # then aborted with "Cache unvollstaendig".
+        prompt_index_by_key: dict[tuple[str, str], int] = {}
+        next_prompt_index: dict[str, int] = {}
         hidden_index = []
         for ex in dataset.examples:
             schem_name = ex.path.name
-            pi = prompt_counter.get(schem_name, 0)
-            prompt_counter[schem_name] = pi + 1
+            lookup_key = (schem_name, ex.prompt)
+            pi = prompt_index_by_key.get(lookup_key)
+            if pi is None:
+                pi = next_prompt_index.get(schem_name, 0)
+                prompt_index_by_key[lookup_key] = pi
+                next_prompt_index[schem_name] = pi + 1
 
             key = (schem_name, pi)
             if key in cache_lookup:
@@ -1226,7 +1767,31 @@ class MultiSourceSchematicDataset(Dataset):
                 f"(Prompt {pi}). Bitte Cache neu berechnen oder einen neuen Cache anlegen."
             )
 
-        dataset.hidden_states = hidden_states
-        dataset.attention_masks = attention_masks
+        dataset._set_hidden_states(hidden_states, attention_masks, hidden_lengths)
         dataset.hidden_index = hidden_index
         return dataset
+
+
+def collate_context_batch(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Default collate with the ragged text context padded to the batch maximum.
+
+    The hidden-state cache stores every prompt unpadded (see
+    app/hidden_state_cache.py). Padding here keeps the waste minimal - the longest
+    prompt of a batch is usually far below the longest prompt of the whole data
+    set (median 14 tokens vs. a 512 token outlier) - and the attention mask marks
+    the padded positions, so the cross-attention ignores them. Pass this as
+    ``collate_fn`` for every DataLoader over a dataset built with
+    ``MultiSourceSchematicDataset.with_cache()``.
+    """
+    if batch and batch[0].get("hidden_states") is not None:
+        max_len = max(int(item["hidden_states"].shape[0]) for item in batch)
+        for item in batch:
+            hidden = item["hidden_states"]
+            pad = max_len - int(hidden.shape[0])
+            if pad <= 0:
+                continue
+            item["hidden_states"] = F.pad(hidden, (0, 0, 0, pad))
+            masks = item.get("attention_masks")
+            if masks is not None:
+                item["attention_masks"] = F.pad(masks, (0, pad))
+    return default_collate(batch)
