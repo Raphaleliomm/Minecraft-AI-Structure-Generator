@@ -6,6 +6,7 @@ Unterstuetzt aktuell:
 * ``abfielder``   - abfielder.com (groesstes freies Archiv, .litematic)
 * ``huggingface`` - Hugging-Face-Datensatz ``Hack337/Minecraft-Schematics``
                     (MIT: rohe .schem/.litematic + JSON-Blueprints)
+* ``mc_schematics`` - mc-schematics.com (Sitemap, direkte .schem-Downloads)
 
 Beide Quellen liefern ein Layout, das ``dataset.py`` direkt lesen kann::
 
@@ -787,6 +788,116 @@ class AbfielderSource(BaseSource):
         return files
 
 
+# ── MC-Schematics.com ──────────────────────────────────────────────────────
+
+class MCSchematicsSource(BaseSource):
+    """Public schematic pages enumerated by the site's sitemap."""
+
+    name = "mc_schematics"
+    label = "MC-Schematics.com"
+    homepage = "https://mc-schematics.com"
+    license_note = "Keine einheitliche Lizenz angegeben; Creator-Rechte beachten"
+    SITEMAP = f"{homepage}/sitemap.xml"
+    DETAIL_RE = re.compile(r"https?://mc-schematics\.com/s/[^<\s]+", re.I)
+    DOWNLOAD_RE = re.compile(
+        r'<a\b[^>]*class="[^"]*\bdl\b[^"]*"[^>]*href="([^"]+)"', re.I
+    )
+
+    def __init__(self) -> None:
+        self._download_robots: RobotsPolicy | None = None
+
+    def discover(self, client: HttpClient, args: argparse.Namespace) -> list[ItemRef]:
+        xml = client.get_text(self.SITEMAP)
+        urls = list(dict.fromkeys(self.DETAIL_RE.findall(xml)))
+        print(f"  MC-Schematics: {len(urls)} Build-Seiten in der Sitemap")
+        return [
+            ItemRef(source_id=url.rstrip("/").rsplit("/", 1)[-1], url=url, kind="detail")
+            for url in urls
+        ]
+
+    def parse_product(self, page_html: str, page_url: str) -> dict[str, str]:
+        def meta(key: str) -> str:
+            match = re.search(
+                rf'<meta[^>]+(?:property|name)="{re.escape(key)}"[^>]+content="([^"]*)"',
+                page_html,
+                re.I,
+            )
+            if not match:
+                match = re.search(
+                    rf'<meta[^>]+content="([^"]*)"[^>]+(?:property|name)="{re.escape(key)}"',
+                    page_html,
+                    re.I,
+                )
+            return html_to_text(match.group(1)) if match else ""
+
+        title = meta("og:title") or meta("twitter:title")
+        title = re.sub(r"\s+Schematic$", "", title, flags=re.I)
+        description = meta("description") or meta("og:description")
+        author_match = re.search(
+            r'<div class="byrow">.*?\bby\s*<b>(.*?)</b>', page_html, re.I | re.S
+        )
+        download_match = self.DOWNLOAD_RE.search(page_html)
+        return {
+            "title": title,
+            "description": description,
+            "author": html_to_text(author_match.group(1)) if author_match else "",
+            "download_url": urllib.parse.urljoin(
+                page_url, html_module.unescape(download_match.group(1))
+            ) if download_match else "",
+        }
+
+    def fetch(self, client: HttpClient, ref: ItemRef, args: argparse.Namespace) -> SourceResult:
+        page_html, page_url = client.get_text_with_url(ref.url)
+        parsed = self.parse_product(page_html, page_url)
+        if not parsed["download_url"]:
+            raise ScrapeError("Build-Seite ohne direkten Download-Link")
+        description = clamp_text(clean_description(parsed["description"]), args.max_prompt_chars)
+        ref.title = parsed["title"] or ref.source_id
+        ref.description = description
+        ref.prompt = description or ref.title
+        ref.author = parsed["author"]
+        record = self.base_record(ref)
+        record["_download_url"] = parsed["download_url"]
+        record["license"] = self.license_note
+        return SourceResult(record)
+
+    def download(
+        self, client: HttpClient, ref: ItemRef, result: SourceResult,
+        out_dir: Path, args: argparse.Namespace,
+    ) -> list[dict[str, Any]]:
+        record = result.record
+        temp_path = out_dir / ".tmp" / f"{slugify(ref.source_id, 48)}.download"
+        try:
+            file_url = record["_download_url"]
+            if self._download_robots is None:
+                self._download_robots = RobotsPolicy(
+                    client, USER_AGENT, enabled=not args.ignore_robots
+                )
+            if not self._download_robots.allowed(file_url):
+                raise RobotsDisallowed(f"robots.txt verbietet Datei-Download ({file_url})")
+            download = client.download(
+                file_url, temp_path,
+                max_bytes=int(args.max_file_mb * 1024 * 1024) if args.max_file_mb > 0 else 0,
+            )
+            entry = materialize_download(
+                download=download, source=self.name, source_id=ref.source_id,
+                title=record["title"], prompt=record.get("prompt") or record["title"],
+                out_dir=out_dir, args=args, index=1,
+            )
+            result.files = [entry] if entry else []
+            return result.files
+        except (ScrapeError, StructureConversionError, OSError, ValueError) as exc:
+            record["errors"] = [str(exc)]
+            result.files = []
+            return []
+        finally:
+            temp_path.unlink(missing_ok=True)
+            try:
+                temp_path.parent.rmdir()
+            except OSError:
+                pass
+
+
 # ── Hugging Face (Hack337/Minecraft-Schematics) ───────────────────────────
 
 class HuggingFaceSource(BaseSource):
@@ -1012,6 +1123,7 @@ class HuggingFaceSource(BaseSource):
 SOURCES: dict[str, type[BaseSource]] = {
     AbfielderSource.name: AbfielderSource,
     HuggingFaceSource.name: HuggingFaceSource,
+    MCSchematicsSource.name: MCSchematicsSource,
 }
 
 
@@ -1322,8 +1434,11 @@ def list_sources() -> None:
     print(f"  {'huggingface':12} {HuggingFaceSource.label}")
     print(f"  {'':12} https://huggingface.co/datasets/{HuggingFaceSource.DEFAULT_DATASET}")
     print(f"  {'':12} MIT-Datensatz: Rohdateien + JSON-Blueprints\n")
+    print(f"  {'mc_schematics':12} {MCSchematicsSource.label}")
+    print(f"  {'':12} {MCSchematicsSource.homepage} - Sitemap + freie .schem-Dateien")
+    print(f"  {'':12} {MCSchematicsSource.license_note}\n")
     print("Bewusst nicht eingebaut (Login, Paywall, KI-Crawler-Verbot oder /api-Sperre):")
-    print("  planetminecraft.com, minecraft-schematics.com, mineschematic.com,")
+    print("  planetminecraft.com, mineschematic.com,")
     print("  shulkr.com, bloxelizer.com, grabcraft.com")
 
 

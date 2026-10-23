@@ -22,6 +22,7 @@ from app.litematic import (
 from dataset import load_schematic
 from scrape_structures import (
     AbfielderSource,
+    MCSchematicsSource,
     clean_description,
     sidecar_prompts,
 )
@@ -210,6 +211,24 @@ def test_abfielder_product_parser_extracts_prompts_and_downloads():
         "https://abfielder.com/Products/ProductDownloadThankYou.php?productId=123&file=456"
     ]
     assert parsed["premium"] is False
+
+
+def test_mc_schematics_parser_extracts_public_download_and_provenance():
+    html = '''<html><head>
+      <meta property="og:title" content="Small House Schematic">
+      <meta name="description" content="A small starter house.">
+    </head><body><div class="byrow"><span>by <b>BuilderOne</b></span></div>
+      <a class="btn dl" href="https://files.mc-schematics.com/b/123/house.schem">Download</a>
+    </body></html>'''
+    parsed = MCSchematicsSource().parse_product(
+        html, "https://mc-schematics.com/s/small-house-123"
+    )
+    assert parsed == {
+        "title": "Small House",
+        "description": "A small starter house.",
+        "author": "BuilderOne",
+        "download_url": "https://files.mc-schematics.com/b/123/house.schem",
+    }
 
 
 def test_clean_description_drops_credits_and_generic_lines():

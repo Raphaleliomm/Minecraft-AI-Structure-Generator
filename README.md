@@ -421,6 +421,7 @@ standardmäßig und lädt nur frei erreichbare Dateien.
 | --- | --- | --- | --- |
 | `abfielder` | abfielder.com, `.litematic` | mehrere Tausend freie Builds (Premium wird übersprungen) | kein Login; Creator-Rechte beachten |
 | `huggingface` | `Hack337/Minecraft-Schematics` | 873 Rohdateien + 669 JSON-Blueprints (ca. 1.358 Einträge) | MIT-Datensatz, `.schem`/`.litematic`/Blueprint |
+| `mc_schematics` | mc-schematics.com, direkte `.schem`-Downloads | Sitemap mit mehreren Tausend Build-Seiten | öffentliche Downloads; keine einheitliche Lizenz angegeben |
 
 ```powershell
 # Quellen und bewusst nicht eingebaute Seiten anzeigen
@@ -434,6 +435,9 @@ python scrape_structures.py --source abfielder --delay 2.5 --jitter 1.0
 
 # Hugging Face: Rohdateien + Blueprints (Standard)
 python scrape_structures.py --source huggingface
+
+# MC-Schematics: kostenlose, direkt verlinkte .schem-Dateien
+python scrape_structures.py --source mc_schematics --max-items 100 --delay 2
 
 # Nur die 669 JSON-Blueprints rekonstruieren
 python scrape_structures.py --source huggingface --blueprints-only
@@ -484,7 +488,7 @@ Dimensionen, Voxel-Limit). Zu große Strukturen werden mit `--max-voxels`
 
 | Option | Wirkung |
 | --- | --- |
-| `--source` | `abfielder`, `huggingface` oder `all` (Komma-Liste möglich) |
+| `--source` | `abfielder`, `huggingface`, `mc_schematics` oder `all` (Komma-Liste möglich) |
 | `--out-root` | Zielordner (Standard `../Trainingsdaten`, je Quelle ein Unterordner) |
 | `--max-items` / `--limit` | Pro Quelle bzw. insgesamt N neue Einträge verarbeiten |
 | `--metadata-only` | nur Metadaten/Prompts, keine Strukturdateien |
@@ -506,7 +510,7 @@ werden übersprungen, fehlgeschlagene bleiben mit `ok: false` in
 > **Rechtlicher Hinweis:** Die Rechte an den Builds liegen bei den jeweiligen
 > Creator:innen. Herkunft, Autor und Lizenz stehen in `structures_meta.jsonl`.
 > Der Scraper umgeht keine Logins, Paywalls oder `robots.txt`-Sperren. Bewusst
-> nicht eingebaut sind u. a. Planet Minecraft, minecraft-schematics.com,
+> nicht eingebaut sind u. a. Planet Minecraft,
 > MineSchematic, Shulkr, Bloxelizer und GrabCraft (Login, Paywall,
 > KI-Crawler-Verbot oder gesperrte `/api`-Pfade). Die Verantwortung für
 > Nutzung, Weitergabe und Veröffentlichung der Daten liegt beim Ausführenden.
