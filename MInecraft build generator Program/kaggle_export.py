@@ -111,8 +111,9 @@ def _create_kaggle_metadata(export_dir: Path, timestamp: str) -> None:
     stamp = timestamp.replace("_", "-")
     dataset_slug = f"minecraft-ai-training-{stamp}"
     kernel_slug = f"minecraft-ai-structure-training-{stamp}"
-    dataset_title = f"Minecraft AI Training {timestamp}"
-    kernel_title = f"Minecraft AI Training {timestamp}"
+    human_stamp = timestamp.replace("_", " ")
+    dataset_title = f"Minecraft AI Training {human_stamp}"
+    kernel_title = f"Minecraft AI Structure Training {human_stamp}"
 
     (export_dir / "dataset-metadata.json").write_text(
         json.dumps(
@@ -734,6 +735,7 @@ def _create_readme(
 def _md_cell(text: str) -> dict:
     return {
         "cell_type": "markdown",
+        "id": f"cell-{abs(hash(text)) % (16 ** 12):012x}",
         "metadata": {},
         "source": [line + "\n" for line in text.strip().split("\n")],
     }
@@ -742,6 +744,7 @@ def _md_cell(text: str) -> dict:
 def _code_cell(code: str) -> dict:
     return {
         "cell_type": "code",
+        "id": f"cell-{abs(hash(code)) % (16 ** 12):012x}",
         "execution_count": None,
         "metadata": {
             "vscode": {
