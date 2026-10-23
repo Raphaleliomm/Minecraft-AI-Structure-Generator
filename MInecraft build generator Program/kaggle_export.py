@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import re
 import shutil
 import tempfile
+import unicodedata
 import zipfile
 from datetime import datetime
 from pathlib import Path
@@ -199,7 +202,7 @@ def _copy_source_files(export_dir: Path) -> None:
 
 
 def _package_training_data(export_dir: Path, data_dirs: List[str]) -> None:
-    """Create a ZIP file containing all training schematics & text files."""
+    """Create an ASCII-named ZIP with schematic files and paired prompt sidecars."""
     zip_path = export_dir / "training_data.zip"
     with zipfile.ZipFile(str(zip_path), "w", zipfile.ZIP_DEFLATED) as zf:
         for dir_path_str in data_dirs:
@@ -207,10 +210,49 @@ def _package_training_data(export_dir: Path, data_dirs: List[str]) -> None:
             if not dir_path.exists():
                 print(f"  Data directory not found, skipping: {dir_path}")
                 continue
-            for fpath in sorted(dir_path.rglob("*")):
-                if fpath.is_file() and fpath.suffix.lower() in {".schem", ".schematic", ".txt", ".json"}:
-                    arcname = f"{dir_path.name}/{fpath.relative_to(dir_path)}"
-                    zf.write(str(fpath), arcname)
+            files = [
+                path for path in sorted(dir_path.rglob("*"))
+                if path.is_file() and path.suffix.lower() in {".schem", ".schematic", ".txt"}
+            ]
+
+            def safe_component(value: str) -> str:
+                ascii_value = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode("ascii")
+                ascii_value = re.sub(r"[^A-Za-z0-9._-]+", "-", ascii_value).strip(" .-")
+                return ascii_value or "structure"
+
+            safe_stems: dict[str, str] = {}
+            raw_by_safe_stem: dict[str, set[str]] = {}
+            for path in files:
+                relative = path.relative_to(dir_path)
+                safe_parent = "/".join(safe_component(part) for part in relative.parts[:-1])
+                key = f"{safe_parent}/{safe_component(relative.stem)}" if safe_parent else safe_component(relative.stem)
+                raw_stem = relative.with_suffix("").as_posix()
+                raw_by_safe_stem.setdefault(key, set()).add(raw_stem)
+                safe_stems[raw_stem] = key
+
+            final_stems = {
+                raw_stem: (
+                    f"{safe_stem}--{hashlib.sha1(raw_stem.encode('utf-8')).hexdigest()[:8]}"
+                    if len(raw_by_safe_stem[safe_stem]) > 1
+                    else safe_stem
+                )
+                for raw_stem, safe_stem in safe_stems.items()
+            }
+            schematic_stems = {
+                (path.parent.relative_to(dir_path).as_posix().casefold(), path.stem.casefold()):
+                    final_stems[path.relative_to(dir_path).with_suffix("").as_posix()]
+                for path in files if path.suffix.lower() in {".schem", ".schematic"}
+            }
+
+            for path in files:
+                relative = path.relative_to(dir_path)
+                raw_stem = relative.with_suffix("").as_posix()
+                safe_stem = final_stems[raw_stem]
+                if path.suffix.lower() == ".txt":
+                    key = (relative.parent.as_posix().casefold(), relative.stem.casefold())
+                    safe_stem = schematic_stems.get(key, safe_stem)
+                arcname = f"{safe_component(dir_path.name)}/{safe_stem}{path.suffix.lower()}"
+                zf.write(str(path), arcname)
     print(f"  Training data ZIP created: {zip_path}")
 
 
