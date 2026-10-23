@@ -77,6 +77,7 @@ def create_kaggle_export(
     _copy_source_files(export_dir)
 
     # ─── 2. Create training data ZIP ───
+    _package_source_code(export_dir)
     _package_training_data(export_dir, data_dirs)
 
     # ─── 3. Create Kaggle notebook ───
@@ -100,7 +101,57 @@ def create_kaggle_export(
     _create_readme(export_dir, epochs, batch_size, learning_rate, grid_size,
                    model_type, architecture, tf_unet_config, air_weight)
 
+    _create_kaggle_metadata(export_dir, timestamp)
+
     return export_dir
+
+
+def _create_kaggle_metadata(export_dir: Path, timestamp: str) -> None:
+    """Describe a private data package and GPU notebook for Kaggle CLI uploads."""
+    stamp = timestamp.replace("_", "-")
+    dataset_slug = f"minecraft-ai-training-{stamp}"
+    kernel_slug = f"minecraft-ai-structure-training-{stamp}"
+    dataset_title = f"Minecraft AI Training {timestamp}"
+    kernel_title = f"Minecraft AI Training {timestamp}"
+
+    (export_dir / "dataset-metadata.json").write_text(
+        json.dumps(
+            {
+                "title": dataset_title,
+                "id": f"raphbre/{dataset_slug}",
+                "licenses": [{"name": "other"}],
+                "description": (
+                    "Private training package for Minecraft AI Structure Generator. "
+                    "Contains creator-attributed schematic files and prompts; "
+                    "underlying builds retain their respective creators' rights."
+                ),
+            },
+            indent=2,
+        ) + "\n",
+        encoding="utf-8",
+    )
+    (export_dir / "kernel-metadata.json").write_text(
+        json.dumps(
+            {
+                "id": f"raphbre/{kernel_slug}",
+                "title": kernel_title,
+                "code_file": "kaggle_notebook.ipynb",
+                "language": "python",
+                "kernel_type": "notebook",
+                "is_private": "true",
+                "enable_gpu": "true",
+                "enable_tpu": "false",
+                "enable_internet": "true",
+                "machine_shape": "",
+                "dataset_sources": [f"raphbre/{dataset_slug}"],
+                "competition_sources": [],
+                "kernel_sources": [],
+                "model_sources": [],
+            },
+            indent=2,
+        ) + "\n",
+        encoding="utf-8",
+    )
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -162,6 +213,22 @@ def _package_training_data(export_dir: Path, data_dirs: List[str]) -> None:
     print(f"  Training data ZIP created: {zip_path}")
 
 
+def _package_source_code(export_dir: Path) -> None:
+    """Bundle Python source and app modules as a Kaggle input artifact."""
+    archive_path = export_dir / "source_code.zip"
+    with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name in ("train.py", "model.py", "dataset.py", "requirements.txt"):
+            source = export_dir / name
+            if source.is_file():
+                zf.write(source, name)
+        app_dir = export_dir / "app"
+        if app_dir.is_dir():
+            for source in sorted(app_dir.rglob("*")):
+                if source.is_file() and "__pycache__" not in source.parts and source.suffix != ".pyc":
+                    zf.write(source, source.relative_to(export_dir).as_posix())
+    print(f"  Source code ZIP created: {archive_path}")
+
+
 def _create_notebook(
     export_dir: Path,
     epochs: int,
@@ -179,174 +246,154 @@ def _create_notebook(
 ) -> None:
     """Create a Kaggle-compatible Jupyter notebook that runs training."""
     gx, gy, gz = grid_size
-    allow_vertical_flag = "true" if allow_vertical else "false"
+    allow_vertical_flag = 'true' if allow_vertical else 'false'
 
-    # Determine architecture based on model type
-    if model_type == "transformer":
-        if architecture:
-            d_model = architecture.get("d_model", 192)
-            nhead = architecture.get("nhead", 6)
-            num_layers = architecture.get("num_layers", 5)
-            dim_ff = architecture.get("dim_feedforward", 768)
-        else:
-            d_model, nhead, num_layers, dim_ff = 192, 6, 5, 768
-    elif model_type == "diffusion":
-        d_model, nhead, num_layers, dim_ff = 128, 0, 0, 0  # Not used for diffusion
-    elif model_type == "transformer_diffusion":
-        if tf_unet_config:
-            channels = tf_unet_config.get("channels", 32)
-            ch_mult = tf_unet_config.get("channel_multipliers", (1, 2, 2))
-            tf_d_model = tf_unet_config.get("d_model", 64)
-            ca_heads = tf_unet_config.get("cross_attn_heads", 4)
-        else:
-            channels, ch_mult, tf_d_model, ca_heads = 32, (1, 2, 2), 64, 4
-        # Use provided encoder info or default to Phi-3.5
-        enc_name = encoder_name or "Phi-3.5-mini"
-        ctx_dim = context_dim or DEFAULT_ENCODER_HIDDEN_DIM
+    if model_type == 'transformer':
+        arch = architecture or {}
+        d_model = int(arch.get('d_model', 192))
+        nhead = int(arch.get('nhead', 6))
+        num_layers = int(arch.get('num_layers', 5))
+        dim_ff = int(arch.get('dim_feedforward', 768))
+    elif model_type == 'diffusion':
+        d_model, nhead, num_layers, dim_ff = 128, 0, 0, 0
+    elif model_type == 'transformer_diffusion':
+        tf_config = tf_unet_config or {}
+        channels = int(tf_config.get('channels', 32))
+        ch_mult = tuple(tf_config.get('channel_multipliers', (1, 2, 2)))
+        tf_d_model = int(tf_config.get('d_model', 64))
+        ca_heads = int(tf_config.get('cross_attn_heads', 4))
+        enc_name = encoder_name or 'Phi-3.5-mini'
+        ctx_dim = int(context_dim or DEFAULT_ENCODER_HIDDEN_DIM)
     else:
-        d_model, nhead, num_layers, dim_ff = 192, 6, 5, 768
+        raise ValueError(f'Unsupported Kaggle model type: {model_type}')
 
-    # Build model creation code based on type
-    if model_type == "transformer":
+    if model_type == 'transformer':
         model_code = _build_transformer_model_code(d_model, nhead, num_layers, dim_ff)
-        train_code = _build_transformer_train_code(air_weight)
-        model_desc = "Shared-Weight Voxel Transformer"
-    elif model_type == "diffusion":
+        train_code = _build_transformer_train_code(
+            air_weight, d_model, nhead, num_layers, dim_ff
+        )
+        model_desc = 'Shared-Weight Voxel Transformer'
+    elif model_type == 'diffusion':
         model_code = _build_diffusion_model_code()
         train_code = _build_diffusion_train_code(air_weight)
-        model_desc = "3D Voxel Diffusion Model"
-    elif model_type == "transformer_diffusion":
-        model_code = _build_tf_diffusion_model_code(channels, ch_mult, tf_d_model, ca_heads, enc_name, ctx_dim)
-        train_code = _build_tf_diffusion_train_code(air_weight, enc_name, ctx_dim)
-        model_desc = "Transformer Diffusion Model"
+        model_desc = '3D Voxel Diffusion Model'
     else:
-        model_code = _build_transformer_model_code(192, 6, 5, 768)
-        train_code = _build_transformer_train_code(air_weight)
-        model_desc = "Shared-Weight Voxel Transformer"
+        model_code = _build_tf_diffusion_model_code(
+            channels, ch_mult, tf_d_model, ca_heads, enc_name, ctx_dim
+        )
+        train_code = _build_tf_diffusion_train_code(air_weight, enc_name, ctx_dim)
+        model_desc = 'Transformer Diffusion Model'
 
     notebook = {
-        "cells": [
+        'cells': [
             _md_cell(
-                f"# Minecraft Structure Generator — Training on Kaggle\n\n"
-                f"**Settings:** Grid {gx}×{gy}×{gz}  ·  "
-                f"{epochs} epochs  ·  batch {batch_size}  ·  "
-                f"lr {learning_rate:.2e}\n\n"
-                f"This notebook trains the **{model_desc}** "
-                f"using the packaged training data.\n\n"
-                f"**Air Weight:** {air_weight}\n\n"
-                "---"
+                f'# Minecraft Structure Generator — Training on Kaggle\n\n'
+                f'**Settings:** Grid {gx}×{gy}×{gz} · {epochs} epochs · '
+                f'batch {batch_size} · lr {learning_rate:.2e}\n\n'
+                f'This notebook trains the **{model_desc}** on the packaged data.'
             ),
             _code_cell(
-                "# Install dependencies\n"
-                "!pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118 -q\n"
-                "!pip install nbtlib matplotlib numpy tqdm -q\n"
-                "!pip install --upgrade sympy -q\n\n"
-                "import sys, os, json, math, random, glob, zipfile, shutil, time, warnings\n"
-                "warnings.filterwarnings('ignore')\n"
-                "from pathlib import Path\n"
-                "import torch\n"
-                "import numpy as np\n\n"
-                "print('Dependencies installed')"
+                '# Install only the missing schematic reader; Kaggle supplies its own CUDA Torch.\n'
+                'import importlib.util, subprocess, sys\n'
+                "if importlib.util.find_spec('nbtlib') is None:\n"
+                "    subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'nbtlib', '-q'])\n"
+                'print("Dependencies ready")'
             ),
             _code_cell(
-                "# Extract training data\n"
-                "DATA_ZIP = '/kaggle/input/training_data.zip'\n"
-                "# The data is bundled in the notebook directory;\n"
-                "# we also copy it from the working dir if different.\n"
-                "data_zip_path = 'training_data.zip'\n"
-                "if os.path.exists(data_zip_path):\n"
-                "    import zipfile\n"
-                "    with zipfile.ZipFile(data_zip_path, 'r') as zf:\n"
-                "        zf.extractall('data')\n"
-                "    print('Extracted training_data.zip to data/')\n"
-                "else:\n"
-                "    print('training_data.zip not found; creating empty directories')\n"
-                "    os.makedirs('data', exist_ok=True)\n\n"
-                "# List what we got\n"
-                "for p in sorted(Path('data').rglob('*.schem'))[:10]:\n"
-                "    print(f'  {p}')\n"
-                "total = len(list(Path('data').rglob('*.schem')))\n"
-                "print(f'Total .schem files: {total}')"
+                '# Locate the uploaded Kaggle dataset and prepare source/data.\n'
+                'import os, sys, time, zipfile\n'
+                'from pathlib import Path\n'
+                "input_root = Path('/kaggle/input')\n"
+                "data_archives = sorted(input_root.rglob('training_data.zip')) if input_root.exists() else []\n"
+                "source_archives = sorted(input_root.rglob('source_code.zip')) if input_root.exists() else []\n"
+                "if not data_archives and Path('training_data.zip').is_file():\n"
+                "    data_archives = [Path('training_data.zip')]\n"
+                "if not data_archives:\n"
+                "    raise FileNotFoundError('training_data.zip not found in Kaggle inputs; attach the generated dataset.')\n"
+                "if not source_archives:\n"
+                "    raise FileNotFoundError('source_code.zip not found in Kaggle inputs; attach the generated dataset.')\n"
+                "archive = data_archives[0]\n"
+                "source_archive = source_archives[0]\n"
+                "source_root = Path('/kaggle/working/minecraft-source')\n"
+                'source_root.mkdir(parents=True, exist_ok=True)\n'
+                'with zipfile.ZipFile(source_archive) as zf:\n'
+                '    bad_member = next((n for n in zf.namelist() if Path(n).is_absolute() or ".." in Path(n).parts), None)\n'
+                '    if bad_member:\n'
+                '        raise ValueError(f"Unsafe path in source archive: {bad_member}")\n'
+                '    zf.extractall(source_root)\n'
+                "if not (source_root / 'train.py').is_file() or not (source_root / 'app').is_dir():\n"
+                "    raise FileNotFoundError('Training source archive is incomplete.')\n"
+                'sys.path.insert(0, str(source_root))\n'
+                "data_root = Path('/kaggle/working/data')\n"
+                'data_root.mkdir(parents=True, exist_ok=True)\n'
+                'with zipfile.ZipFile(archive) as zf:\n'
+                '    bad_member = next((n for n in zf.namelist() if Path(n).is_absolute() or ".." in Path(n).parts), None)\n'
+                '    if bad_member:\n'
+                '        raise ValueError(f"Unsafe path in training archive: {bad_member}")\n'
+                '    zf.extractall(data_root)\n'
+                "schematics = list(data_root.rglob('*.schem')) + list(data_root.rglob('*.schematic'))\n"
+                "if not schematics:\n"
+                "    raise RuntimeError('Training archive contains no .schem/.schematic files.')\n"
+                'print(f"Source: {source_root}")\n'
+                'print(f"Training archive: {archive}")\n'
+                'print(f"Structures found: {len(schematics)}")'
             ),
             _code_cell(
-                "# Import model & dataset\n"
-                "sys.path.insert(0, '.')\n"
-                "from dataset import MultiSourceSchematicDataset, PromptTokenizer, VoxelTokenizer\n"
-                + (f"from model import SharedWeightVoxelTransformer\n" if model_type == "transformer" else "")
-                + (f"from app.diffusion_model import VoxelDiffusionModel, train_diffusion_step\n" if model_type == "diffusion" else "")
-                + (f"from app.diffusion_model import TransformerDiffusionModel, train_transformer_diffusion_step\n" if model_type == "transformer_diffusion" else "")
-                + "from torch.utils.data import DataLoader\n\n"
-                "print('Modules imported')"
-            ),
-            _code_cell(
-                "# Settings (auto-filled from GUI)\n"
-                f"GRID_SIZE = ({gx}, {gy}, {gz})\n"
-                f"EPOCHS = {epochs}\n"
-                f"BATCH_SIZE = {batch_size}\n"
-                f"LR = {learning_rate}\n"
-                f"AUG_DIVERSITY = {aug_diversity}\n"
-                f"ALLOW_VERTICAL = {allow_vertical_flag}\n"
-                f"AIR_WEIGHT = {air_weight}\n"
-                f"NOISE_BLOCK_PROB = 0.20  # 20% of steps get random wrong blocks injected (learn to remove bad blocks)\n\n"
+                '# Training settings\n'
+                f'GRID_SIZE = ({gx}, {gy}, {gz})\n'
+                f'EPOCHS = {epochs}\n'
+                f'BATCH_SIZE = {batch_size}\n'
+                f'LR = {learning_rate}\n'
+                f'AUG_DIVERSITY = {aug_diversity}\n'
+                f'ALLOW_VERTICAL = {allow_vertical_flag}\n'
+                f'AIR_WEIGHT = {air_weight}\n'
+                'import torch\n'
                 "DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')\n"
-                "print(f'Device: {DEVICE}')\n"
-                "if torch.cuda.is_available():\n"
-                "    print(f'   GPU: {torch.cuda.get_device_name(0)}')\n"
-                "    print(f'   Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB')"
+                'print(f"Device: {DEVICE}")\n'
+                'if DEVICE.type == "cuda":\n'
+                '    print(f"GPU: {torch.cuda.get_device_name(0)}")\n'
+                'else:\n'
+                '    raise RuntimeError("Kaggle GPU is unavailable; enable GPU in the notebook settings.")'
             ),
             _code_cell(
-                "# Load dataset\n"
-                "data_dirs = [str(p) for p in Path('data').iterdir() if p.is_dir()]\n"
-                "print(f'Data directories: {data_dirs}')\n\n"
-                "dataset = MultiSourceSchematicDataset(\n"
-                "    data_dirs,\n"
-                "    target_size=GRID_SIZE,\n"
-                "    max_voxels=400_000,\n"
-                "    augmentation_diversity=AUG_DIVERSITY,\n"
-                "    allow_vertical_movement=ALLOW_VERTICAL,\n"
-                "    air_weight_factor=AIR_WEIGHT,\n"
-                ")\n\n"
-                "print(f'Dataset size: {len(dataset)}')\n"
-                "print(f'Block vocab: {len(dataset.voxel_tokenizer.id_to_block)}')\n"
-                "print(f'Prompt vocab: {len(dataset.prompt_tokenizer.token_to_id)}')\n\n"
-                "loader = DataLoader(\n"
-                "    dataset, batch_size=BATCH_SIZE, shuffle=True,\n"
-                "    num_workers=2, pin_memory=(DEVICE.type == 'cuda'),\n"
-                ")"
+                '# Load data and initialize the training loader.\n'
+                'from dataset import MultiSourceSchematicDataset\n'
+                'from torch.utils.data import DataLoader\n'
+                'dataset = MultiSourceSchematicDataset(\n'
+                '    [str(data_root)], target_size=GRID_SIZE, max_voxels=400_000,\n'
+                '    augmentation_diversity=AUG_DIVERSITY,\n'
+                '    allow_vertical_movement=ALLOW_VERTICAL, air_weight_factor=AIR_WEIGHT,\n'
+                ')\n'
+                "if len(dataset) == 0:\n"
+                '    raise RuntimeError("No usable prompt/structure training examples were discovered.")\n'
+                'print(f"Training examples: {len(dataset)}")\n'
+                'print(f"Block vocab: {len(dataset.voxel_tokenizer.id_to_block)}")\n'
+                'print(f"Prompt vocab: {len(dataset.prompt_tokenizer.token_to_id)}")\n'
+                'loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, pin_memory=True)'
             ),
             _code_cell(model_code),
             _code_cell(train_code),
             _code_cell(
-                "# Training complete\n"
-                "elapsed = time.time() - start_time\n"
-                "print(f'Training completed in {elapsed/60:.1f} min')\n"
-                "print(f'Best loss: {best_loss:.4f}')\n"
-                "print(f'Model saved to model.pt')\n\n"
-                "# Download link for the model\n"
-                "print('\\nTo download the trained model, find model.pt in the output tab.')"
+                '# Training summary\n'
+                'elapsed = time.time() - start_time\n'
+                'print(f"Training completed in {elapsed / 60:.1f} min")\n'
+                'print(f"Best loss: {best_loss:.4f}")\n'
+                'print("Model saved to model.pt in the notebook working directory")'
             ),
         ],
-        "metadata": {
-            "kernelspec": {
-                "display_name": "Python 3 (GPU)",
-                "language": "python",
-                "name": "python3",
-            },
-            "language_info": {
-                "name": "python",
-                "version": "3.10.0",
-            },
+        'metadata': {
+            'kernelspec': {'display_name': 'Python 3', 'language': 'python', 'name': 'python3'},
+            'language_info': {'name': 'python', 'version': '3.10.0'},
+            'kaggle': {'accelerator': 'GPU', 'dataSources': []},
         },
-        "nbformat": 4,
-        "nbformat_minor": 5,
+        'nbformat': 4,
+        'nbformat_minor': 5,
     }
 
-    notebook_path = export_dir / "kaggle_notebook.ipynb"
-    with open(str(notebook_path), "w", encoding="utf-8") as f:
-        json.dump(notebook, f, indent=1, ensure_ascii=False)
-    print(f"  Notebook created: {notebook_path}")
-
-
+    notebook_path = export_dir / 'kaggle_notebook.ipynb'
+    with notebook_path.open('w', encoding='utf-8') as handle:
+        json.dump(notebook, handle, indent=1, ensure_ascii=False)
+    print(f'  Notebook created: {notebook_path}')
 def _build_transformer_model_code(d_model, nhead, num_layers, dim_ff):
     return (
         "# Create model\n"
@@ -375,7 +422,7 @@ def _build_transformer_model_code(d_model, nhead, num_layers, dim_ff):
     )
 
 
-def _build_transformer_train_code(air_weight):
+def _build_transformer_train_code(air_weight, d_model, nhead, num_layers, dim_ff):
     return (
         "# Training Loop\n"
         "best_loss = float('inf')\n"
@@ -719,3 +766,4 @@ if __name__ == "__main__":
         model_type="transformer",
     )
     print(f"\nExport created at: {path}")
+
