@@ -56,13 +56,15 @@ verwendet (rekursiv, also auch verschachtelte Datensätze).
 │   ├── hidden_state_cache.py     # Cache für Encoder-Hidden-States
 │   ├── training_memory.py        # VRAM-Abschätzung, Chunk-/Batch-Planung (Training & Generierung)
 │   ├── voxel_preview.py          # 2D-Voxel-Vorschau (Pillow)
-│   └── voxel_viewer_3d.py        # 3D-Viewer (pyglet/OpenGL, eigener Prozess)
+│   ├── voxel_viewer_3d.py        # 3D-Viewer (pyglet/OpenGL, eigener Prozess)
+│   └── litematic.py              # .litematic/Blueprint -> Sponge-.schem
 ├── dataset.py                    # .schem/.schematic Import, Tokenizer, Augmentierung
 ├── model.py                      # Shared-Weight-Voxel-Transformer (Single-Pass)
 ├── train.py                      # Kommandozeilen-Training (Transformer)
 ├── generate.py                   # Kommandozeilen-Generierung (Transformer)
 ├── filter_dataset.py             # Dataset-Filterung nach Größe
 ├── scrape_phantommarket.py       # Dataset-Scraper (market.phantom-node.com)
+├── scrape_structures.py          # Mehrquellen-Scraper (Abfielder, Hugging Face)
 ├── scrape_all.bat                # Starter für den Volllauf (resume-fähig)
 ├── validate_schematics.py        # Validierung von .schem-Dateien (ohne nbtlib)
 ├── kaggle_export.py              # Export für Kaggle-Notebooks
@@ -76,6 +78,7 @@ verwendet (rekursiv, also auch verschachtelte Datensätze).
     ├── test_dataset_startup.py   # Startzeit/Speicherbedarf der Datensatz-Suche
     ├── test_preview_render.py    # 2D-Vorschau (Rendering, Threading)
     ├── test_prompt_sidecars.py   # Prompt-Dateien (.txt/prompts.json) des Scrapers
+    ├── test_structure_conversion.py # Litematic/Blueprint -> .schem + Quellen-Parser
     ├── test_training_memory.py   # VRAM-Planung & gechunkte Logits (Training)
     ├── test_generation_memory.py # VRAM-Planung & gechunkte Logits (Generierung)
     ├── test_encoder_fallback.py  # Text-Encoder: VRAM oder System-RAM (Rückfrage)
@@ -406,6 +409,107 @@ in der Datei und werden beim nächsten Lauf erneut versucht.
 > und der Download-Endpoint liegt unter `Disallow: /api/`. Das Skript ist ein
 > lokales Werkzeug – die Verantwortung für Nutzung und Weitergabe der Daten
 > liegt beim Ausführenden.
+
+## Weitere Quellen laden (`scrape_structures.py`)
+
+`scrape_structures.py` ergänzt PhantomMarket um weitere **frei zugängliche**
+Quellen. Die großen Portale sind entweder login-pflichtig, kostenpflichtig oder
+sperren KI-Crawler in der `robots.txt`; der Scraper respektiert `robots.txt`
+standardmäßig und lädt nur frei erreichbare Dateien.
+
+| Quelle | Inhalt | Umfang | Hinweis |
+| --- | --- | --- | --- |
+| `abfielder` | abfielder.com, `.litematic` | mehrere Tausend freie Builds (Premium wird übersprungen) | kein Login; Creator-Rechte beachten |
+| `huggingface` | `Hack337/Minecraft-Schematics` | 873 Rohdateien + 669 JSON-Blueprints (ca. 1.358 Einträge) | MIT-Datensatz, `.schem`/`.litematic`/Blueprint |
+
+```powershell
+# Quellen und bewusst nicht eingebaute Seiten anzeigen
+python scrape_structures.py --list-sources
+
+# Abfielder: erst 20 Browse-Seiten testen, max. 200 neue Builds
+python scrape_structures.py --source abfielder --abfielder-pages 20 --max-items 200 --delay 2
+
+# Kompletter Abfielder-Lauf (resume-fähig, kann mehrere Stunden dauern)
+python scrape_structures.py --source abfielder --delay 2.5 --jitter 1.0
+
+# Hugging Face: Rohdateien + Blueprints (Standard)
+python scrape_structures.py --source huggingface
+
+# Nur die 669 JSON-Blueprints rekonstruieren
+python scrape_structures.py --source huggingface --blueprints-only
+
+# Beide Quellen, insgesamt max. 500 neue Einträge
+python scrape_structures.py --source all --max-items 500
+
+# prompts.json nachträglich aus structures_meta.jsonl neu schreiben
+python scrape_structures.py --source abfielder --rebuild-prompts
+```
+
+Ausgabe-Layout (pro Quelle ein eigener Ordner, direkt als `--data-dir` nutzbar):
+
+```
+Trainingsdaten/
+├── abfielder/
+│   ├── structures_meta.jsonl        # Herkunft, Titel, Beschreibung, Dateien, Status
+│   ├── prompts.json                 # {"<datei>.schem": ["<name>", "<prompt>"]}
+│   ├── abfielder-<id>__<name>.schem
+│   ├── abfielder-<id>__<name>.txt   # Prompt-Sidecar (Name / '---' / Beschreibung)
+│   └── abfielder-<id>__<name>.litematic   # optional via --keep-litematic
+└── huggingface/
+    ├── structures_meta.jsonl
+    ├── prompts.json
+    ├── huggingface-<id>__<name>.schem
+    └── huggingface-<id>__<name>.txt
+```
+
+### Litematica-Konvertierung
+
+`app/litematic.py` wandelt `.litematic` lokal in Sponge-`.schem` um – ohne
+externe Tools. Unterstützt werden:
+
+* beide Litematica-Bitpacking-Varianten (klassisch mit Restbits pro Long und
+  das kontinuierliche Packing neuerer Versionen),
+* mehrere Regionen, negative `Size`-Werte und daraus resultierende
+  Bounding-Boxen,
+* BlockEntities (Positionen werden korrekt auf die Schematic-Min-Ecke
+  umgerechnet) und Entities,
+* das JSON-Blueprint-Format aus `Hack337/Minecraft-Schematics`
+  (`size`/`palette`/`layers`, Luft = `.`).
+
+Die erzeugten Dateien werden vor dem Schreiben validiert (gzip, Sponge-Root,
+Dimensionen, Voxel-Limit). Zu große Strukturen werden mit `--max-voxels`
+übersprungen.
+
+### Wichtige Optionen
+
+| Option | Wirkung |
+| --- | --- |
+| `--source` | `abfielder`, `huggingface` oder `all` (Komma-Liste möglich) |
+| `--out-root` | Zielordner (Standard `../Trainingsdaten`, je Quelle ein Unterordner) |
+| `--max-items` / `--limit` | Pro Quelle bzw. insgesamt N neue Einträge verarbeiten |
+| `--metadata-only` | nur Metadaten/Prompts, keine Strukturdateien |
+| `--abfielder-pages` / `--abfielder-start-page` | Browse-Seiten begrenzen bzw. verschieben |
+| `--blueprints-only` / `--no-blueprints` | Hugging Face: nur Blueprints bzw. nur Rohdateien |
+| `--max-voxels` | Strukturen über N Voxel überspringen (Standard 20 Mio.) |
+| `--max-file-mb` | Downloads über N MB überspringen (Standard 250) |
+| `--keep-litematic` | Original `.litematic` neben der `.schem` behalten |
+| `--dedupe-by-hash` | identische Zieldateien überspringen |
+| `--redownload` / `--refresh-meta` | Dateien bzw. Metadaten erneut laden |
+| `--order` | `source`, `shuffle` oder `reverse` |
+| `--ignore-robots` | robots.txt ignorieren (nicht empfohlen) |
+| `--dry-run` | nur Discovery, keine Downloads |
+
+Der Lauf ist **unterbrechbar und resume-fähig**: Bereits vollständige Einträge
+werden übersprungen, fehlgeschlagene bleiben mit `ok: false` in
+`structures_meta.jsonl` und werden beim nächsten Lauf erneut versucht.
+
+> **Rechtlicher Hinweis:** Die Rechte an den Builds liegen bei den jeweiligen
+> Creator:innen. Herkunft, Autor und Lizenz stehen in `structures_meta.jsonl`.
+> Der Scraper umgeht keine Logins, Paywalls oder `robots.txt`-Sperren. Bewusst
+> nicht eingebaut sind u. a. Planet Minecraft, minecraft-schematics.com,
+> MineSchematic, Shulkr, Bloxelizer und GrabCraft (Login, Paywall,
+> KI-Crawler-Verbot oder gesperrte `/api`-Pfade). Die Verantwortung für
+> Nutzung, Weitergabe und Veröffentlichung der Daten liegt beim Ausführenden.
 
 ## Abhängigkeiten
 
