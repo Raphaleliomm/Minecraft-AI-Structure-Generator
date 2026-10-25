@@ -893,7 +893,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=0,
         help="Lauf beenden, nachdem N Builds verarbeitet wurden (0 = kein Limit, Resume-freundlich)",
     )
-    parser.add_argument("--max-file-mb", type=float, default=250.0, help="Groessere Dateien ueberspringen (0 = kein Limit)")
+    parser.add_argument("--max-file-mb", type=float, default=0, help="Maximale Quelldateigroesse in MB (0 = kein Limit)")
     parser.add_argument("--delay", type=float, default=0.8, help="Pause zwischen zwei Requests in Sekunden")
     parser.add_argument("--jitter", type=float, default=0.4, help="Zufaelliger Zusatz zur Pause in Sekunden")
     parser.add_argument("--timeout", type=float, default=60.0, help="HTTP-Timeout in Sekunden")

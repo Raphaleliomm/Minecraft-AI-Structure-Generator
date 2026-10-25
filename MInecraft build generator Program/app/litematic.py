@@ -283,7 +283,7 @@ def load_litematic(
         raise StructureConversionError(f"{path.name}: Dimension {size} > {MAX_DIMENSION}")
 
     num_voxels = size[0] * size[1] * size[2]
-    if max_voxels is not None and num_voxels > max_voxels:
+    if max_voxels is not None and max_voxels > 0 and num_voxels > max_voxels:
         raise StructureTooLarge(size, max_voxels, path.name)
 
     palette: list[str] = [AIR]
@@ -588,7 +588,8 @@ def detect_structure_format(raw: bytes) -> str:
         root = root["Schematic"]
     if "Regions" in root:
         return "litematic"
-    if "Blocks" in root and "Palette" in root["Blocks"]:
+    blocks = root.get("Blocks")
+    if isinstance(blocks, Mapping) and "Palette" in blocks:
         return "schem"
     if "Blocks" in root and "Palette" in root:
         return "schem"

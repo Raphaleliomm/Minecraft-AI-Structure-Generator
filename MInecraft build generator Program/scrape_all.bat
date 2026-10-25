@@ -1,15 +1,12 @@
 @echo off
-title PhantomMarket Trainingsdaten-Scraper
+title Minecraft Trainingsdaten Scraper
 cd /d "%~dp0"
 echo ============================================
-echo   PhantomMarket Scraper - Volllauf
-echo   Build-Beschreibung = Prompt
-echo   Ziel: ..\Trainingsdaten\phantommarket
-echo   Abbruch mit Strg+C - Neustart macht weiter (Resume)
+echo   Minecraft Scraper - alle Quellen parallel
+echo   Resume-faehig; Abbruch mit Strg+C
 echo ============================================
 echo.
-python -u scrape_phantommarket.py --delay 1.0 --jitter 0.4 --max-file-mb 600
+python -u scrape_structures.py --source all --workers 3 --delay 0.5 --jitter 0.2 --max-file-mb 0 --max-voxels 0
 echo.
-echo Lauf beendet (oder abgebrochen). Ein Neustart setzt fort,
-echo bereits geladene Builds werden uebersprungen.
+echo Lauf beendet. Neustart setzt fort.
 pause

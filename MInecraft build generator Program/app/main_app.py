@@ -190,7 +190,9 @@ class MinecraftStructureApp(ctk.CTk):
         self.current_view: str = "free"
         # Startmodell-Typ aus config.json (dort bereits validiert)
         self.model_type: str = self.config.default_model
+        self.generation_dit_mode: bool = False
         self.transformer_model: Optional[SharedWeightVoxelTransformer] = None
+        self.dit_encoder: Optional[FrozenTransformerEncoder] = None
         self.diffusion_model: Optional[VoxelDiffusionModel] = None
         self.tf_diffusion_model: Optional[TransformerDiffusionModel] = None
         self.tf_encoder: Optional[FrozenTransformerEncoder] = None
@@ -425,7 +427,7 @@ class MinecraftStructureApp(ctk.CTk):
 
         ctk.CTkLabel(model_frame, text=self._tr("model_type"), font=("Segoe UI", 14, "bold")).grid(row=0, column=0, padx=(0, 8))
         self.model_type_selector = ctk.CTkSegmentedButton(
-            model_frame, values=["Transformer", "Diffusion", "TF-Diffusion"],
+            model_frame, values=["TF-Diffusion", "DiT"],
             command=self._on_model_type_change, font=("Segoe UI", 12),
         )
         self.model_type_selector.grid(row=0, column=1, sticky="ew", padx=(0, 12))
@@ -633,33 +635,17 @@ class MinecraftStructureApp(ctk.CTk):
         sep = ctk.CTkFrame(self.models_container, height=2, fg_color=("gray70", "gray30"))
         sep.grid(row=row, column=0, sticky="ew", pady=16)
         row += 1
-        # Transformers
-        ctk.CTkLabel(self.models_container, text=self._tr("transformer_models"),
+        # Recurrent-depth DiT models only (plain Transformer checkpoints are hidden by the registry).
+        ctk.CTkLabel(self.models_container, text="DiT Models",
                      font=("Segoe UI", 18, "bold"), text_color="#60a5fa").grid(row=row, column=0, sticky="w", pady=(0, 8))
         row += 1
         transformers = self.model_registry.get_by_type("transformer")
         if not transformers:
-            ctk.CTkLabel(self.models_container, text=self._tr("no_transformer"),
+            ctk.CTkLabel(self.models_container, text="(No recurrent-depth DiT models found)",
                          font=("Segoe UI", 12), text_color=("gray60", "gray50")).grid(row=row, column=0, sticky="w", pady=(0, 12))
             row += 1
         else:
             for entry in transformers:
-                self._build_model_card(self.models_container, row, entry)
-                row += 1
-        sep2 = ctk.CTkFrame(self.models_container, height=2, fg_color=("gray70", "gray30"))
-        sep2.grid(row=row, column=0, sticky="ew", pady=16)
-        row += 1
-        # Diffusions
-        ctk.CTkLabel(self.models_container, text=self._tr("diffusion_models"),
-                     font=("Segoe UI", 18, "bold"), text_color="#a78bfa").grid(row=row, column=0, sticky="w", pady=(0, 8))
-        row += 1
-        diffusions = self.model_registry.get_by_type("diffusion")
-        if not diffusions:
-            ctk.CTkLabel(self.models_container, text=self._tr("no_diffusion"),
-                         font=("Segoe UI", 12), text_color=("gray60", "gray50")).grid(row=row, column=0, sticky="w", pady=(0, 12))
-            row += 1
-        else:
-            for entry in diffusions:
                 self._build_model_card(self.models_container, row, entry)
                 row += 1
         self._refresh_model_combo()
@@ -683,7 +669,8 @@ class MinecraftStructureApp(ctk.CTk):
         badge_color = "#3b82f6" if entry.model_type == "transformer" else "#8b5cf6"
         if entry.model_type == "transformer_diffusion":
             badge_color = "#c084fc"
-        ctk.CTkLabel(hdr, text=f" {entry.model_type.upper()} ", font=("Segoe UI", 11, "bold"),
+        model_label = "DIT" if entry.model_type == "transformer" else entry.model_type.upper()
+        ctk.CTkLabel(hdr, text=f" {model_label} ", font=("Segoe UI", 11, "bold"),
                      fg_color=badge_color, text_color="white", corner_radius=4, padx=8).grid(row=0, column=1, padx=4)
         meta = ctk.CTkFrame(card, fg_color="transparent")
         meta.grid(row=1, column=0, sticky="ew", padx=14, pady=2)
@@ -691,7 +678,9 @@ class MinecraftStructureApp(ctk.CTk):
         grid_str = f"{entry.grid_size[0]}×{entry.grid_size[1]}×{entry.grid_size[2]}"
         bl = self._tr("blocks_label")
         if entry.model_type == "transformer":
-            info = (f"d_model={entry.d_model}  heads={entry.nhead}  layers={entry.num_layers}  "
+            text_encoder_info = f"  text={entry.text_encoder_name}" if entry.text_encoder_name else "  text=learned"
+            info = (f"d_model={entry.d_model}  max depth={entry.recurrent_depth}{text_encoder_info}  "
+                    f"MoE={entry.moe_active}/{entry.moe_experts}  heads={entry.nhead}  "
                     f"FFN={entry.dim_feedforward}  {bl}={entry.block_vocab_size}")
         elif entry.model_type == "transformer_diffusion":
             info = (f"d_model={entry.d_model}  channels={entry.channels}  steps={entry.num_timesteps}  "
@@ -730,15 +719,19 @@ class MinecraftStructureApp(ctk.CTk):
             self.status_var.set(self._tr("status_model_not_found", name=name))
             return
         if entry.model_type == "transformer":
+            if entry.recurrent_depth <= 1 and entry.moe_experts <= 0:
+                self.status_var.set("Dieser normale Transformer ist nicht in der Generier-Auswahl")
+                return
             self.model_type = "transformer"
+            self.generation_dit_mode = True
             self.current_transformer_name = name
-            self.model_type_selector.set("Transformer")
+            self.model_type_selector.set("DiT")
         elif entry.model_type == "diffusion":
-            self.model_type = "diffusion"
-            self.current_diffusion_name = name
-            self.model_type_selector.set("Diffusion")
+            self.status_var.set("Normale Diffusion ist nicht in der Generier-Auswahl")
+            return
         elif entry.model_type == "transformer_diffusion":
             self.model_type = "transformer_diffusion"
+            self.generation_dit_mode = False
             self.current_tf_diffusion_name = name
             self.model_type_selector.set("TF-Diffusion")
         self.tab_view.set(self._tr("tab_generate"))
@@ -908,7 +901,7 @@ class MinecraftStructureApp(ctk.CTk):
 
         epochs_var = ctk.StringVar(value="10")
         add_entry_row(1, self._tr("tm_epochs"), epochs_var)
-        batch_var = ctk.StringVar(value="4")
+        batch_var = ctk.StringVar(value="16")
         add_entry_row(2, self._tr("tm_batch_size"), batch_var)
         lr_var = ctk.StringVar(value="1.5e-3")
         add_entry_row(3, self._tr("tm_learning_rate"), lr_var)
@@ -1059,7 +1052,7 @@ class MinecraftStructureApp(ctk.CTk):
         werden Panel, Grid und Parameter dort auf den Checkpoint gesetzt -
         gerechnet wird mit den Werten aus dem Dialog (siehe _start_train_more).
         """
-        panel_label = {"transformer": "Transformer", "diffusion": "Diffusion",
+        panel_label = {"transformer": "DiT (Recurrent)",
                        "transformer_diffusion": "TF-Diffusion"}.get(entry.model_type)
         if panel_label:
             self.train_model_type_selector.set(panel_label)
@@ -1173,7 +1166,7 @@ class MinecraftStructureApp(ctk.CTk):
         ctk.CTkLabel(type_frame, text=self._tr("model_type"), font=("Segoe UI", 14, "bold")).grid(
             row=0, column=0, padx=(0, 8), sticky="w")
         self.train_model_type_selector = ctk.CTkSegmentedButton(
-            type_frame, values=["Transformer", "Diffusion", "TF-Diffusion"],
+            type_frame, values=["TF-Diffusion", "DiT (Recurrent)"],
             command=self._on_train_type_change, font=("Segoe UI", 12),
         )
         self.train_model_type_selector.grid(row=0, column=1, sticky="w")
@@ -1183,10 +1176,9 @@ class MinecraftStructureApp(ctk.CTk):
         self.train_panels_container.grid(row=row, column=0, sticky="ew")
         self.train_panels_container.grid_columnconfigure(0, weight=1)
 
-        # ─── Build all three panels (only one shown at a time) ───
+        # ─── Build supported training panels ───
         self._build_tf_diffusion_train_panel(self.train_panels_container)
         self._build_transformer_train_panel(self.train_panels_container)
-        self._build_diffusion_train_panel(self.train_panels_container)
 
         # ─── Show default panel later once all widgets exist ───
 
@@ -1230,7 +1222,7 @@ class MinecraftStructureApp(ctk.CTk):
         ctk.CTkLabel(param_grid, text=self._tr("batch_size")).grid(row=0, column=2, sticky="w", padx=(16, 8))
         self.train_batch_entry = ctk.CTkEntry(param_grid, width=80)
         self.train_batch_entry.grid(row=0, column=3, sticky="w")
-        self.train_batch_entry.insert(0, "4")
+        self.train_batch_entry.insert(0, "16")
 
         ctk.CTkLabel(param_grid, text=self._tr("learning_rate")).grid(row=1, column=0, sticky="w", padx=(0, 8), pady=(4, 0))
         self.train_lr_entry = ctk.CTkEntry(param_grid, width=80)
@@ -1313,39 +1305,32 @@ class MinecraftStructureApp(ctk.CTk):
         btn_frame = ctk.CTkFrame(scroll, fg_color="transparent")
         btn_frame.grid(row=row+10, column=0, sticky="w", pady=10)
 
-        self.train_btn_transformer = ctk.CTkButton(
-            btn_frame, text=self._tr("btn_train_transformer"), font=("Segoe UI", 12, "bold"),
+        self.train_btn_dit = ctk.CTkButton(
+            btn_frame, text=self._tr("btn_train_dit"), font=("Segoe UI", 12, "bold"),
             command=lambda: self._start_training("transformer"))
-        self.train_btn_transformer.grid(row=0, column=0, padx=(0, 8))
-
-        self.train_btn_diffusion = ctk.CTkButton(
-            btn_frame, text=self._tr("btn_train_diffusion"), font=("Segoe UI", 12, "bold"),
-            fg_color="#7c3aed", hover_color="#6d28d9",
-            command=lambda: self._start_training("diffusion"))
-        self.train_btn_diffusion.grid(row=0, column=1, padx=(0, 8))
+        self.train_btn_dit.grid(row=0, column=0, padx=(0, 8))
 
         self.train_btn_tf_diffusion = ctk.CTkButton(
             btn_frame, text=self._tr("btn_train_tf_diffusion"), font=("Segoe UI", 12, "bold"),
             fg_color="#c084fc", hover_color="#a855f7",
             command=lambda: self._start_tf_diffusion_training())
-        self.train_btn_tf_diffusion.grid(row=0, column=2, padx=(0, 8))
+        self.train_btn_tf_diffusion.grid(row=0, column=1, padx=(0, 8))
 
         self.train_stop_btn = ctk.CTkButton(
             btn_frame, text=self._tr("btn_stop_save"), font=("Segoe UI", 12, "bold"),
             fg_color="#dc2626", hover_color="#b91c1c", state="disabled",
             command=self._stop_training)
-        self.train_stop_btn.grid(row=0, column=3, padx=(8, 0))
+        self.train_stop_btn.grid(row=0, column=2, padx=(8, 0))
 
         self.kaggle_export_btn = ctk.CTkButton(
             btn_frame, text=self._tr("btn_kaggle_export"), font=("Segoe UI", 12, "bold"),
             fg_color="#dc2626", hover_color="#b91c1c",
             command=self._export_kaggle_dialog)
-        self.kaggle_export_btn.grid(row=0, column=4, padx=(8, 0))
+        self.kaggle_export_btn.grid(row=0, column=3, padx=(8, 0))
 
         # Show default panel and TF-Diffusion button after full construction
         self.after(0, lambda: (
-            self.train_btn_diffusion.grid_remove(),
-            self.train_btn_transformer.grid_remove(),
+            self.train_btn_dit.grid_remove(),
             self.train_model_type_selector.set("TF-Diffusion"),
             self._on_train_type_change("TF-Diffusion"),
         ))
@@ -1505,6 +1490,32 @@ class MinecraftStructureApp(ctk.CTk):
         self.params_info_label.grid(row=row, column=0, columnspan=3, sticky="ew", pady=(4, 2))
         row += 1
 
+        ctk.CTkLabel(panel, text="Prompt input", font=("Segoe UI", 11, "bold")).grid(
+            row=row, column=0, sticky="w", pady=(4, 2))
+        self.dit_text_encoder_var = ctk.StringVar(value="Learned embeddings")
+        self.dit_text_encoder_menu = ctk.CTkOptionMenu(
+            panel, values=["Learned embeddings", *MODEL_NAMES],
+            variable=self.dit_text_encoder_var, width=200,
+            command=lambda _value: self._update_arch_from_advanced(),
+        )
+        self.dit_text_encoder_menu.grid(row=row, column=1, sticky="w", padx=4, pady=(4, 2))
+        row += 1
+        ctk.CTkLabel(panel, text="Learned by DiT or frozen pretrained text encoder",
+                     font=("Segoe UI", 10), text_color=("gray50", "gray40")).grid(
+            row=row, column=0, columnspan=3, sticky="w", pady=(0, 3))
+        row += 1
+
+        ctk.CTkLabel(panel, text=self._tr("attention_window"), font=("Segoe UI", 11)).grid(
+            row=row, column=0, sticky="w", pady=(4, 2))
+        self.attention_window_var = ctk.StringVar(value="8³")
+        self.attention_window_menu = ctk.CTkOptionMenu(
+            panel, values=["4³", "8³", "16³", "Global"],
+            variable=self.attention_window_var, width=150,
+            command=lambda _value: self._on_attention_window_changed(),
+        )
+        self.attention_window_menu.grid(row=row, column=1, sticky="w", padx=4, pady=(4, 2))
+        row += 1
+
         self.show_advanced = False
         self.advanced_btn = ctk.CTkButton(panel, text=self._tr("btn_advanced"), font=("Segoe UI", 11),
                                           width=180, height=28, fg_color="#334155", hover_color="#475569",
@@ -1516,6 +1527,7 @@ class MinecraftStructureApp(ctk.CTk):
         self.advanced_frame.grid(row=row, column=0, columnspan=3, sticky="ew", pady=(2, 6))
         self.advanced_frame.grid_remove()
         self.advanced_frame.grid_columnconfigure(1, weight=1)
+        self.advanced_frame.grid_columnconfigure(3, weight=1)
 
         self.adv_vars = {}
         self.adv_entries = {}
@@ -1534,8 +1546,18 @@ class MinecraftStructureApp(ctk.CTk):
             self.adv_vars[key] = var
             self.adv_entries[key] = entry
             var.trace_add("write", lambda *_: self._update_arch_from_advanced())
+        ctk.CTkLabel(self.advanced_frame, text="Max. recurrent depth").grid(row=4, column=0, sticky="w", padx=8, pady=3)
+        self.dit_depth_var = ctk.StringVar(value="4")
+        ctk.CTkEntry(self.advanced_frame, width=80, textvariable=self.dit_depth_var).grid(row=4, column=1, sticky="w", padx=4, pady=3)
+        self.moe_enabled_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(self.advanced_frame, text="Mixture of Experts", variable=self.moe_enabled_var).grid(row=5, column=0, sticky="w", padx=8, pady=3)
+        self.moe_experts_var = ctk.StringVar(value="4")
+        self.moe_active_var = ctk.StringVar(value="2")
+        ctk.CTkLabel(self.advanced_frame, text="Experts total / active").grid(row=5, column=1, sticky="w", padx=4, pady=3)
+        ctk.CTkEntry(self.advanced_frame, width=48, textvariable=self.moe_experts_var).grid(row=5, column=2, sticky="w", padx=2, pady=3)
+        ctk.CTkEntry(self.advanced_frame, width=48, textvariable=self.moe_active_var).grid(row=5, column=3, sticky="w", padx=2, pady=3)
         ctk.CTkButton(self.advanced_frame, text=self._tr("btn_calculate"), font=("Segoe UI", 10), width=100, height=26,
-                      command=self._update_arch_from_advanced).grid(row=4, column=0, padx=8, pady=4, sticky="w")
+                      command=self._update_arch_from_advanced).grid(row=6, column=0, padx=8, pady=4, sticky="w")
 
         self.transformer_panel = panel  # save reference
 
@@ -1572,27 +1594,22 @@ class MinecraftStructureApp(ctk.CTk):
 
     def _on_train_type_change(self, value: str):
         # Hide all panels
-        for panel_name in ['tf_panel', 'transformer_panel', 'diffusion_panel']:
+        for panel_name in ['tf_panel', 'transformer_panel']:
             panel = getattr(self, panel_name, None)
             if panel:
                 panel.grid_remove()
         # Hide all training buttons
         self.train_btn_tf_diffusion.grid_remove()
-        self.train_btn_transformer.grid_remove()
-        self.train_btn_diffusion.grid_remove()
+        self.train_btn_dit.grid_remove()
         # Show selected panel and matching button
         if value == "TF-Diffusion":
             if hasattr(self, 'tf_panel'):
                 self.tf_panel.grid()
             self.train_btn_tf_diffusion.grid()
-        elif value == "Transformer":
+        elif value == "DiT (Recurrent)":
             if hasattr(self, 'transformer_panel'):
                 self.transformer_panel.grid()
-            self.train_btn_transformer.grid()
-        elif value == "Diffusion":
-            if hasattr(self, 'diffusion_panel'):
-                self.diffusion_panel.grid()
-            self.train_btn_diffusion.grid()
+            self.train_btn_dit.grid()
 
     # ═══════════════════════════════════════════════════════════════
     # TRANSFORMER DIFFUSION - TRAINING CONTROLS
@@ -1808,6 +1825,7 @@ class MinecraftStructureApp(ctk.CTk):
             return
         self.training_running = True
         params["continue_from"] = continue_from
+        params["architecture"] = dict(arch)
         self.tf_progress_bar.set(0)
         self.train_btn_tf_diffusion.configure(state="disabled")
         self.train_stop_btn.configure(state="normal")
@@ -2351,7 +2369,6 @@ class MinecraftStructureApp(ctk.CTk):
             self._tr("about_cross_attn"),
             self._tr("about_3d_unet"),
             self._tr("about_transformer"),
-            self._tr("about_diffusion"),
             self._tr("about_3d_preview"),
             self._tr("about_text_to_struct"),
             self._tr("about_model_manager"),
@@ -2373,6 +2390,8 @@ class MinecraftStructureApp(ctk.CTk):
     def _refresh_model_combo(self):
         self.model_registry.discover()
         models = self.model_registry.get_by_type(self.model_type)
+        if self.model_type_selector.get() == "DiT":
+            models = [m for m in models if m.recurrent_depth > 1 or m.moe_experts > 0]
         names = [m.name for m in models] if models else [self._tr("none")]
         current = ""
         if self.model_type == "transformer" and self.current_transformer_name:
@@ -2387,6 +2406,9 @@ class MinecraftStructureApp(ctk.CTk):
                        else self.model_registry.default_tf_diffusion)
             if default and default in names:
                 current = default
+        if self.model_type == "transformer" and self.model_type_selector.get() == "DiT":
+            current = current if current in names else (names[0] if names and names[0] != self._tr("none") else "")
+            self.current_transformer_name = current or None
         self.model_version_combo.configure(values=names if names else [self._tr("none")])
         if current:
             try:
@@ -2399,10 +2421,10 @@ class MinecraftStructureApp(ctk.CTk):
     def _on_model_type_change(self, value: str):
         if value == "TF-Diffusion":
             self.model_type = "transformer_diffusion"
-        elif value == "Diffusion":
-            self.model_type = "diffusion"
+            self.generation_dit_mode = False
         else:
             self.model_type = "transformer"
+            self.generation_dit_mode = True
         self._refresh_model_combo()
         self._update_diffusion_visibility()
         self._load_models_async()
@@ -2487,8 +2509,20 @@ class MinecraftStructureApp(ctk.CTk):
             grid_size=tuple(ckpt["grid_size"]), d_model=ckpt["d_model"],
             nhead=ckpt.get("nhead", 6), num_layers=ckpt["layers"],
             dim_feedforward=ckpt.get("dim_feedforward", 768), dropout=0.0,
+            recurrent_depth=ckpt.get("recurrent_depth", 1),
+            moe_experts=ckpt.get("moe_experts", 0), moe_active=ckpt.get("moe_active", 1),
+            text_input_dim=int(ckpt.get("text_input_dim", 0) or 0),
+            text_encoder_name=ckpt.get("text_encoder_name", ""),
+            window_size=ckpt.get("window_size", 0),
+            tread_ratio=ckpt.get("tread_ratio", 0.25),
+            ssa_topk=ckpt.get("ssa_topk", 16),
+            voxel_mask_ratio=ckpt.get("voxel_mask_ratio", 0.65),
         ).to(device)
-        model.load_state_dict(ckpt["model_state"])
+        missing, unexpected = model.load_state_dict(ckpt["model_state"], strict=False)
+        if unexpected or any(not key.startswith("recurrence_router.") for key in missing):
+            raise RuntimeError(
+                f"Checkpoint passt nicht zur DiT-Architektur (fehlend={missing}, unerwartet={unexpected})"
+            )
         model.eval()
         self.prompt_tokenizer = prompt_tokenizer
         self.voxel_tokenizer = voxel_tokenizer
@@ -2571,10 +2605,14 @@ class MinecraftStructureApp(ctk.CTk):
         # Vor dem Laden aufraeumen: der Trainer/Encoder kann Speicher hinterlassen
         # haben, den `mem_get_info` sonst als belegt meldet.
         release_cuda_cache()
+        self.model_registry.discover()
         tf_name = self.current_transformer_name or self.model_registry.default_transformer
+        if self.generation_dit_mode:
+            dit_models = [m for m in self.model_registry.get_by_type("transformer")
+                          if m.recurrent_depth > 1 or m.moe_experts > 0]
+            tf_name = self.current_transformer_name if self.current_transformer_name in {m.name for m in dit_models} else (dit_models[0].name if dit_models else None)
         df_name = self.current_diffusion_name or self.model_registry.default_diffusion
         tf_diff_name = self.current_tf_diffusion_name or self.model_registry.default_tf_diffusion
-        self.model_registry.discover()
         msg_parts: List[str] = []
         errors: List[str] = []
 
@@ -2642,11 +2680,13 @@ class MinecraftStructureApp(ctk.CTk):
         if self.model_type == "transformer" and self.transformer_model is not None:
             model = self.transformer_model
             grid_size = tuple(int(v) for v in model.grid_size)
-            layers = len(model.decoder.layers)
-            first = model.decoder.layers[0]
+            layers = model.recurrent_depth if model.decoder is None else len(model.decoder.layers)
+            first = model.decoder_layer if model.decoder is None else model.decoder.layers[0]
             attn, rest = transformer_generation_bytes(
                 grid_size, 1, model.block_vocab_size, model.d_model,
-                first.self_attn.num_heads, layers, first.linear1.out_features)
+                first.self_attn.num_heads, layers, first.linear1.out_features,
+                window_size=model.window_size,
+                recurrent_depth=model.recurrent_depth if model.decoder is None else 1)
             plan = plan_generation(grid_size, model.block_vocab_size, device=device,
                                    activation_bytes=attn + rest)
         elif self.model_type == "diffusion" and self.diffusion_model is not None:
@@ -2691,10 +2731,28 @@ class MinecraftStructureApp(ctk.CTk):
                 self.after(0, lambda m=plan_message: self.status_var.set(m))
             info = ""
             if self.model_type == "transformer" and self.transformer_model is not None:
-                prompt_ids = self.prompt_tokenizer.encode(prompt).unsqueeze(0).to(device)
-                grid = self.transformer_model.generate(
-                    prompt_ids, temperature=temp, top_k=topk,
-                    chunk_voxels=chunk_voxels)[0].cpu()
+                if self.transformer_model.text_encoder_name:
+                    if (self.dit_encoder is None or
+                            self.dit_encoder.display_name != self.transformer_model.text_encoder_name):
+                        self.dit_encoder = (
+                            self.tf_encoder if self.tf_encoder is not None and
+                            self.tf_encoder.display_name == self.transformer_model.text_encoder_name
+                            else self._create_tf_encoder(self.transformer_model.text_encoder_name))
+                    with torch.no_grad():
+                        encoded = self.dit_encoder([prompt])
+                        model_dtype = next(self.transformer_model.parameters()).dtype
+                        prompt_embeddings = encoded["last_hidden_state"].to(device=device, dtype=model_dtype)
+                        prompt_mask = encoded["attention_mask"].to(device=device)
+                    grid = self.transformer_model.generate(
+                        temperature=temp, top_k=topk, chunk_voxels=chunk_voxels,
+                        prompt_embeddings=prompt_embeddings,
+                        prompt_attention_mask=prompt_mask,
+                    )[0].cpu()
+                else:
+                    prompt_ids = self.prompt_tokenizer.encode(prompt).unsqueeze(0).to(device)
+                    grid = self.transformer_model.generate(
+                        prompt_ids, temperature=temp, top_k=topk,
+                        chunk_voxels=chunk_voxels)[0].cpu()
                 self.id_to_block = self.voxel_tokenizer.id_to_block
                 gs = grid.shape
                 info = self._tr("gen_transformer_done", x=gs[0], y=gs[1], z=gs[2], temp=f"{temp:.2f}", topk=topk, prompt=prompt[:60])
@@ -3138,6 +3196,7 @@ class MinecraftStructureApp(ctk.CTk):
 
     def _get_suggested_arch(self) -> Optional[dict]:
         grid_size = self._get_selected_grid_size()
+        window_size = self._get_attention_window_size()
         # Use actual vocab sizes from loaded tokenizers if available, otherwise use defaults
         text_vocab = len(self.prompt_tokenizer.token_to_id) if self.prompt_tokenizer else 129
         block_vocab = len(self.voxel_tokenizer.id_to_block) if self.voxel_tokenizer else 253
@@ -3151,13 +3210,26 @@ class MinecraftStructureApp(ctk.CTk):
                 from model import estimate_transformer_params
                 params = estimate_transformer_params(text_vocab, block_vocab, grid_size, d_model, nhead, layers, dim_ff)
                 return {"d_model": d_model, "nhead": nhead, "num_layers": layers,
-                        "dim_feedforward": dim_ff, "params": params, "params_m": params / 1_000_000}
+                        "dim_feedforward": dim_ff, "params": params, "params_m": params / 1_000_000,
+                        "window_size": window_size}
             except (ValueError, ZeroDivisionError):
                 return None
         else:
             target_m = self.size_slider_var.get()
             from model import suggest_architecture
-            return suggest_architecture(target_m, text_vocab, block_vocab, grid_size)
+            arch = suggest_architecture(target_m, text_vocab, block_vocab, grid_size)
+            arch["window_size"] = window_size
+            return arch
+
+    def _get_attention_window_size(self) -> int:
+        value = str(self.attention_window_var.get())
+        return 0 if value == "Global" else int(value.split("³", 1)[0])
+
+    def _on_attention_window_changed(self):
+        if self.show_advanced:
+            self._update_arch_from_advanced()
+        else:
+            self._on_size_slider(self.size_slider_var.get())
 
     def _on_size_slider(self, value: float):
         if self.show_advanced:
@@ -3167,6 +3239,7 @@ class MinecraftStructureApp(ctk.CTk):
             self.params_info_var.set(self._tr("no_arch_found"))
             return
         self.params_info_var.set(self._tr("target_arch", val=f"{value:.1f}", params=f"{arch['params_m']:.2f}", d_model=arch['d_model'], nhead=arch['nhead'], layers=arch['num_layers'], ffn=arch['dim_feedforward']))
+        arch["window_size"] = self._get_attention_window_size()
         self._selected_arch = arch
 
     def _update_aug_label(self, value: float):
@@ -3230,7 +3303,7 @@ class MinecraftStructureApp(ctk.CTk):
         try:
             batch_size = int(str(self.train_batch_entry.get()).strip())
         except (TypeError, ValueError):
-            batch_size = 4
+            batch_size = 16
         try:
             lr = float(str(self.train_lr_entry.get()).strip())
         except (TypeError, ValueError):
@@ -3325,15 +3398,48 @@ class MinecraftStructureApp(ctk.CTk):
         """
         if self.training_running:
             return
-        if model_type not in ("transformer", "diffusion"):
-            # TF-Diffusion laeuft ueber _start_tf_diffusion_training; jeder
-            # andere Typ wuerde im Worker stumm nichts tun.
+        if model_type != "transformer":
+            # Classic Diffusion has been removed from the application UI.
             self.status_var.set(self._tr("status_unknown_train_type", type=model_type))
             return
         arch = getattr(self, '_selected_arch', None)
         if arch is None:
             self._on_size_slider(self.size_slider_var.get())
             arch = self._selected_arch
+        arch = dict(arch or {})
+        arch["window_size"] = self._get_attention_window_size()
+        if self.train_model_type_selector.get() == "DiT (Recurrent)":
+            try:
+                arch["recurrent_depth"] = int(self.dit_depth_var.get())
+                arch["moe_experts"] = max(0, int(self.moe_experts_var.get())) if self.moe_enabled_var.get() else 0
+                arch["moe_active"] = max(1, int(self.moe_active_var.get()))
+            except (TypeError, ValueError):
+                self.status_var.set("Ungültige DiT/MoE-Konfiguration")
+                return
+            if arch["recurrent_depth"] < 2:
+                self.status_var.set("DiT braucht mindestens 2 Recurrent-Schritte")
+                return
+            if arch["recurrent_depth"] > 64 or arch["moe_experts"] > 32:
+                self.status_var.set("Maximal 64 Recurrent-Schritte und 32 Experten sind erlaubt")
+                return
+            if arch["moe_experts"] and arch["moe_active"] > arch["moe_experts"]:
+                self.status_var.set("Aktive Experten dürfen nicht größer als die Gesamtzahl sein")
+                return
+            from model import estimate_active_transformer_params, estimate_transformer_params
+            text_vocab = len(self.prompt_tokenizer.token_to_id) if self.prompt_tokenizer else 129
+            block_vocab = len(self.voxel_tokenizer.id_to_block) if self.voxel_tokenizer else 253
+            selected_encoder = self.dit_text_encoder_var.get()
+            text_input_dim = (ENCODER_HIDDEN_DIMS.get(selected_encoder, DEFAULT_ENCODER_HIDDEN_DIM)
+                              if selected_encoder != "Learned embeddings" else 0)
+            total_params = estimate_transformer_params(text_vocab, block_vocab, grid_size or self._get_selected_grid_size(),
+                arch["d_model"], arch["nhead"], arch["num_layers"], arch["dim_feedforward"],
+                arch["recurrent_depth"], arch["moe_experts"], text_input_dim)
+            active_params = estimate_active_transformer_params(text_vocab, block_vocab, grid_size or self._get_selected_grid_size(),
+                arch["d_model"], arch["nhead"], arch["num_layers"], arch["dim_feedforward"],
+                arch["recurrent_depth"], arch["moe_experts"], arch["moe_active"], text_input_dim)
+            suffix = f" | MoE {arch['moe_active']}/{arch['moe_experts']} Experten" if arch["moe_experts"] else ""
+            self.params_info_var.set(f"DiT: {active_params/1e6:.2f}M aktiv / {total_params/1e6:.2f}M gesamt{suffix}")
+        self._selected_arch = arch
         grid_size = tuple(grid_size) if grid_size else self._get_selected_grid_size()
         augmentation_diversity = int(round(float(self.augmentation_diversity_var.get())))
         allow_vertical_movement = bool(self.setting_aug_vertical.get())
@@ -3345,16 +3451,21 @@ class MinecraftStructureApp(ctk.CTk):
             augmentation_diversity = int(params["augmentation_diversity"])
             allow_vertical_movement = bool(params["allow_vertical_movement"])
         params["continue_from"] = continue_from
+        params["dit_enabled"] = self.train_model_type_selector.get() == "DiT (Recurrent)"
+        params["window_size"] = arch["window_size"]
         gs_label = f"{grid_size[0]}x{grid_size[1]}x{grid_size[2]}"
         self.training_running = True
         self.train_epoch_bar.set(0)
         self.train_batch_bar.set(0)
         self.status_var.set(self._tr("status_training_started", type=model_type, grid=gs_label))
-        self.train_btn_transformer.configure(state="disabled")
-        self.train_btn_diffusion.configure(state="disabled")
+        self.train_btn_dit.configure(state="disabled")
         self.train_btn_tf_diffusion.configure(state="disabled")
         self.train_stop_btn.configure(state="normal")
         self._current_training_type = model_type
+        if params.get("dit_enabled"):
+            params["dit_text_encoder_name"] = (
+                None if self.dit_text_encoder_var.get() == "Learned embeddings"
+                else self.dit_text_encoder_var.get())
         threading.Thread(target=self._training_worker,
                          args=(model_type, grid_size, augmentation_diversity,
                                allow_vertical_movement, params),
@@ -3369,7 +3480,7 @@ class MinecraftStructureApp(ctk.CTk):
             lr = float(params["lr"])
             air_weight = float(params["air_weight"])
             device = torch.device("cuda" if torch.cuda.is_available() and self.config.gpu_enabled else "cpu")
-            arch = getattr(self, '_selected_arch', None)
+            arch = params.get("architecture", getattr(self, '_selected_arch', None))
             continue_from = params.get("continue_from")
             # Batch halten statt verkleinern (Gradient-Akkumulation, siehe
             # app/grad_accum.py) - der Schalter im Training-Tab entscheidet.
@@ -3396,6 +3507,16 @@ class MinecraftStructureApp(ctk.CTk):
                   and tuple(self.diffusion_model.grid_size) == grid_size):
                 continuing_name = self.current_diffusion_name
             continuing_model = continuing_name is not None
+
+            dit_encoder = None
+            dit_encoder_name = params.get("dit_text_encoder_name") if model_type == "transformer" else None
+            if continuing_model and model_type == "transformer":
+                dit_encoder_name = self.transformer_model.text_encoder_name or None
+            if dit_encoder_name:
+                dit_encoder = (self.tf_encoder if self.tf_encoder is not None and
+                               self.tf_encoder.display_name == dit_encoder_name
+                               else self._create_tf_encoder(dit_encoder_name))
+                self.dit_encoder = dit_encoder
 
             orig_pt = None
             orig_vt = None
@@ -3432,13 +3553,8 @@ class MinecraftStructureApp(ctk.CTk):
             self._report_dataset_ready(dataset)
 
             # ── VRAM-Plan ──
-            # Der VoxelTransformer berechnet die Self-Attention ueber ALLE Voxel
-            # (Grid 32^3 -> 6 * 32768^2 * 4 Byte = 24 GiB pro Matrix und Layer,
-            # nicht chunkbar), das
-            # Diffusionsmodell erzeugt einen Logits-Tensor
-            # [Batch, Bloecke, Voxel] (34,55 GiB bei Grid 32^3, 17.690
-            # Blockzustaenden und Batch 16). Beides wird hier vor dem ersten
-            # Batch geprueft - inklusive Chunk-Groesse fuer die Logits.
+            # Lokale Fenster-Attention und chunkweise Logits werden vor dem
+            # Training gemeinsam mit Batch und Speicherbudget geplant.
             num_blocks = len(dataset.voxel_tokenizer.id_to_block)
             if model_type == "transformer":
                 if continuing_model:
@@ -3446,20 +3562,28 @@ class MinecraftStructureApp(ctk.CTk):
                     # die (nur angezeigte) Zielgroesse aus dem Training-Tab.
                     model = self.transformer_model
                     plan_d_model = model.d_model
-                    plan_nhead = model.decoder.layers[0].self_attn.num_heads
-                    plan_layers = len(model.decoder.layers)
-                    plan_ff = model.decoder.layers[0].linear1.out_features
+                    layer = model.decoder_layer if model.decoder is None else model.decoder.layers[0]
+                    plan_nhead = layer.self_attn.num_heads
+                    plan_layers = model.recurrent_depth if model.decoder is None else len(model.decoder.layers)
+                    plan_ff = layer.linear1.out_features
+                    plan_window_size = model.window_size
+                    plan_recurrent_depth = model.recurrent_depth if model.decoder is None else 1
                 elif arch:
                     plan_d_model = arch["d_model"]
                     plan_nhead = arch["nhead"]
-                    plan_layers = arch["num_layers"]
+                    plan_layers = arch.get("recurrent_depth", arch["num_layers"]) if params.get("dit_enabled") else arch["num_layers"]
                     plan_ff = arch["dim_feedforward"]
+                    plan_window_size = int(arch.get("window_size", 8))
+                    plan_recurrent_depth = plan_layers if params.get("dit_enabled") else 1
                 else:
                     plan_d_model, plan_nhead, plan_layers, plan_ff = 192, 6, 5, 768
+                    plan_window_size, plan_recurrent_depth = 8, 1
                 plan = plan_transformer_training(
                     grid_size, batch_size, num_blocks, device=device,
                     d_model=plan_d_model, nhead=plan_nhead,
                     num_layers=plan_layers, dim_feedforward=plan_ff,
+                    window_size=plan_window_size,
+                    recurrent_depth=plan_recurrent_depth,
                     allow_accumulation=allow_accum,
                 )
             else:
@@ -3491,12 +3615,22 @@ class MinecraftStructureApp(ctk.CTk):
                         d_model, nhead, num_layers, dim_ff = arch["d_model"], arch["nhead"], arch["num_layers"], arch["dim_feedforward"]
                     else:
                         d_model, nhead, num_layers, dim_ff = 192, 6, 5, 768
+                    arch_cfg = arch or {}
+                    is_dit = bool(params.get("dit_enabled", False))
+                    recurrent_depth = max(1, int(arch_cfg.get("recurrent_depth", 4))) if is_dit else 1
+                    moe_experts = int(arch_cfg.get("moe_experts", 0)) if is_dit else 0
+                    moe_active = int(arch_cfg.get("moe_active", 1)) if is_dit else 1
                     model = SharedWeightVoxelTransformer(
                         text_vocab_size=len(dataset.prompt_tokenizer.token_to_id),
                         block_vocab_size=len(dataset.voxel_tokenizer.id_to_block),
                         grid_size=grid_size, d_model=d_model, nhead=nhead,
                         num_layers=num_layers, dim_feedforward=dim_ff, dropout=0.1,
+                        recurrent_depth=recurrent_depth, moe_experts=moe_experts, moe_active=moe_active,
+                        window_size=int(arch_cfg.get("window_size", params.get("window_size", 8))),
+                        text_input_dim=int(dit_encoder.hidden_dim) if dit_encoder else 0,
+                        text_encoder_name=dit_encoder_name,
                     ).to(device)
+                    print(f"DiT parameters total/active: {model.num_parameters:,} / {model.active_parameters:,}")
                     dataset.prompt_tokenizer.save(out_dir / "prompt_vocab.json")
                     dataset.voxel_tokenizer.save(out_dir / "block_vocab.json")
 
@@ -3525,20 +3659,25 @@ class MinecraftStructureApp(ctk.CTk):
                             prompt_ids = micro["prompt_ids"].to(device)
                             target = micro["voxel_ids"].to(device).reshape(prompt_ids.shape[0], -1)
                             target = model.safe_clamp_target(target)
-                            logits = model(prompt_ids)
-                            target_flat = target.reshape(-1)
-                            sample_weight = micro["sample_weight"].to(device).view(-1, 1).expand_as(target).reshape(-1)
-                            per_block_w = micro["per_block_weight"].to(device).view(-1, 1).expand_as(target).reshape(-1)
-                            per_air_w = micro["per_air_weight"].to(device).view(-1, 1).expand_as(target).reshape(-1)
-                            weight_per_token = torch.where(target_flat == 0, per_air_w, per_block_w) * sample_weight
-                            logp = torch.log_softmax(logits.reshape(-1, logits.shape[-1]), dim=-1)
-                            nll = torch.nn.functional.nll_loss(logp, target_flat, reduction='none')
-                            loss = (nll * weight_per_token).sum() / weight_per_token.sum().clamp_min(1.0)
-                            # Der Anteil am Gesamt-Batch skaliert nur den Gradienten;
-                            # die angezeigte Kurve bleibt der Mittelwert.
-                            backward_loss = loss if share == 1.0 else loss * share
-                            backward_loss.backward()
-                            batch_loss += float(loss.detach()) * share
+                            if dit_encoder is not None:
+                                with torch.no_grad():
+                                    encoded = dit_encoder(list(micro["prompt_text"]))
+                                    prompt_embeddings = encoded["last_hidden_state"].to(
+                                        device=device, dtype=next(model.parameters()).dtype)
+                                    prompt_mask = encoded["attention_mask"].to(device)
+                                model_inputs = {"prompt_embeddings": prompt_embeddings,
+                                                "prompt_attention_mask": prompt_mask}
+                            else:
+                                model_inputs = {"prompt_ids": prompt_ids}
+                            sample_weight = micro["sample_weight"].to(device).view(-1, 1).expand_as(target)
+                            per_block_w = micro["per_block_weight"].to(device).view(-1, 1).expand_as(target)
+                            per_air_w = micro["per_air_weight"].to(device).view(-1, 1).expand_as(target)
+                            weight_per_token = torch.where(target == 0, per_air_w, per_block_w) * sample_weight
+                            loss = model.backward_weighted_loss(
+                                target, weight_per_token, chunk_voxels=chunk_voxels,
+                                grad_scale=share, **model_inputs,
+                            )
+                            batch_loss += loss * share
                         apply_optimizer_step(model, optimizer)
                         total_loss += batch_loss
                         if batch_num % max(1, total_batches // 10) == 0 or batch_num == total_batches:
@@ -3554,9 +3693,17 @@ class MinecraftStructureApp(ctk.CTk):
                     torch.save({"model_state": model.state_dict(), "grid_size": grid_size,
                                 "text_vocab_size": len(dataset.prompt_tokenizer.token_to_id),
                                 "block_vocab_size": len(dataset.voxel_tokenizer.id_to_block),
-                                "d_model": model.d_model, "nhead": model.decoder.layers[0].self_attn.num_heads,
-                                "layers": len(model.decoder.layers),
-                                "dim_feedforward": model.decoder.layers[0].linear1.out_features,
+                                "d_model": model.d_model, "nhead": (model.decoder_layer if model.decoder is None else model.decoder.layers[0]).self_attn.num_heads,
+                                "layers": len(model.decoder.layers) if model.decoder is not None else num_layers,
+                                "dim_feedforward": model.decoder.layers[0].linear1.out_features if model.decoder is not None else dim_ff,
+                                "recurrent_depth": model.recurrent_depth,
+                                "window_size": model.window_size,
+                                "tread_ratio": model.tread_ratio,
+                                "ssa_topk": model.ssa_topk,
+                                "voxel_mask_ratio": model.voxel_mask_ratio,
+                                "moe_experts": model.moe_experts, "moe_active": model.moe_active,
+                                "text_encoder_name": model.text_encoder_name,
+                                "text_input_dim": model.text_input_dim,
                                 "augmentation_diversity": augmentation_diversity,
                                 "allow_vertical_movement": allow_vertical_movement,
                                 "epoch": done_epoch, "loss": avg_loss}, out_dir / "model.pt")
@@ -3648,8 +3795,7 @@ class MinecraftStructureApp(ctk.CTk):
             self.after(0, lambda msg=str(e)[:100]: self.train_loss_var.set(self._tr("training_error", msg=msg)))
         finally:
             self.training_running = False
-            self.after(0, lambda: self.train_btn_transformer.configure(state="normal"))
-            self.after(0, lambda: self.train_btn_diffusion.configure(state="normal"))
+            self.after(0, lambda: self.train_btn_dit.configure(state="normal"))
             self.after(0, lambda: self.train_btn_tf_diffusion.configure(state="normal"))
             self.after(0, lambda: self.train_stop_btn.configure(state="disabled"))
             # Siehe _tf_diffusion_training_worker: ohne das bleibt der VRAM-Peak
@@ -3682,12 +3828,33 @@ class MinecraftStructureApp(ctk.CTk):
         params["data_dirs"] = list(self.data_dirs)
         params["model_type"] = {
             "Transformer": "transformer",
+            "DiT (Recurrent)": "transformer",
             "Diffusion": "diffusion",
             "TF-Diffusion": "transformer_diffusion",
         }.get(self.train_model_type_selector.get(), "transformer")
-        params["architecture"] = getattr(self, "_selected_arch", None)
+        params["dit_enabled"] = self.train_model_type_selector.get() == "DiT (Recurrent)"
+        params["architecture"] = dict(getattr(self, "_selected_arch", None) or {})
+        params["architecture"]["window_size"] = self._get_attention_window_size()
+        if self.train_model_type_selector.get() == "DiT (Recurrent)":
+            selected_encoder = self.dit_text_encoder_var.get()
+            params["dit_text_encoder_name"] = (
+                None if selected_encoder == "Learned embeddings" else selected_encoder)
+            params["architecture"].update({
+                "recurrent_depth": max(1, int(self.dit_depth_var.get())),
+                "moe_experts": max(0, int(self.moe_experts_var.get())) if self.moe_enabled_var.get() else 0,
+                "moe_active": max(1, int(self.moe_active_var.get())),
+            })
+        else:
+            for key in ("recurrent_depth", "moe_experts", "moe_active"):
+                params["architecture"].pop(key, None)
         params["tf_unet_config"] = getattr(self, "_tf_unet_config", None)
-        params["encoder"] = self._describe_selected_encoder()
+        if params["model_type"] == "transformer" and params["dit_enabled"]:
+            dit_encoder_name = params.get("dit_text_encoder_name")
+            params["encoder"] = ((dit_encoder_name,
+                                  ENCODER_HIDDEN_DIMS.get(dit_encoder_name, DEFAULT_ENCODER_HIDDEN_DIM))
+                                 if dit_encoder_name else (None, None))
+        else:
+            params["encoder"] = self._describe_selected_encoder()
         threading.Thread(target=self._kaggle_export_worker, args=(params,), daemon=True).start()
 
     def _describe_selected_encoder(self) -> Optional[Tuple[str, int]]:

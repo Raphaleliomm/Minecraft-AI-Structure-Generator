@@ -1476,6 +1476,7 @@ class MultiSourceSchematicDataset(Dataset):
         self.schematics = LazySchematicStore(
             max_voxels=max_voxels, cache_voxels=schematic_cache_voxels)
         self._schematic_by_path: dict[Path, int] = {}
+        self._invalid_paths: set[Path] = set()
         self._transform_by_path: dict[Path, list[PlacementTransform]] = {}
         self._category_by_path: dict[Path, int] = {}
         self.skipped_examples: list[Path] = []
@@ -1496,6 +1497,9 @@ class MultiSourceSchematicDataset(Dataset):
                 progress_callback(processed, total_examples)
 
             resolved = path.resolve()
+            if resolved in self._invalid_paths:
+                self.skipped_examples.append(path)
+                continue
             if resolved in self._oversize_paths:
                 self.skipped_examples.append(path)
                 continue
@@ -1510,6 +1514,14 @@ class MultiSourceSchematicDataset(Dataset):
                     self._oversize_paths.add(resolved)
                     self.oversize_voxels += exc.num_voxels
                     self.skipped_examples.append(path)
+                    continue
+                except Exception as exc:
+                    # A malformed downloaded schematic must not abort an entire
+                    # long training run. Remember it so alternate prompts for
+                    # the same file are skipped without decoding it repeatedly.
+                    self._invalid_paths.add(resolved)
+                    self.skipped_examples.append(path)
+                    print(f"Ungueltige Schematic uebersprungen: {path.name}: {exc}", flush=True)
                     continue
                 schematic_index = self.schematics.add(path, schematic)
                 self._schematic_by_path[resolved] = schematic_index

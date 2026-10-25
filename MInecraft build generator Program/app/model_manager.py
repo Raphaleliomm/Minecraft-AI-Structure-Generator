@@ -1,5 +1,4 @@
-"""Model Manager - discovers, loads, manages multiple Transformer, Diffusion,
-and Transformer Diffusion models.
+"""Model Manager - discovers, loads and manages DiT and TF-Diffusion models.
 
 Each model is stored as a checkpoint directory under runs/ with:
   runs/
@@ -75,12 +74,16 @@ def _extract_metadata(ckpt: dict) -> Dict:
         "nhead": int(ckpt.get("nhead", 0)),
         "layers": int(ckpt.get("layers", 0)),
         "dim_feedforward": int(ckpt.get("dim_feedforward", 0)),
+        "recurrent_depth": int(ckpt.get("recurrent_depth", 1)),
+        "moe_experts": int(ckpt.get("moe_experts", 0)),
+        "moe_active": int(ckpt.get("moe_active", 1)),
         "channels": int(ckpt.get("channels", 0)),
         "num_timesteps": int(ckpt.get("num_timesteps", 0)),
         "context_dim": int(ckpt.get("context_dim", 0)),
         "cross_attn_heads": int(ckpt.get("cross_attn_heads", 0)),
         "encoder_config": encoder_config,
         "encoder_name": str(encoder_config.get("display_name", "")),
+        "text_encoder_name": str(ckpt.get("text_encoder_name", "") or ""),
         "has_encoder_config": "encoder_config" in ckpt,
         "has_channels": "channels" in ckpt or "num_timesteps" in ckpt,
     }
@@ -136,6 +139,9 @@ class ModelEntry:
     nhead: int = 0
     num_layers: int = 0
     dim_feedforward: int = 0
+    recurrent_depth: int = 1
+    moe_experts: int = 0
+    moe_active: int = 1
     channels: int = 0       # Diffusion / TF-Diffusion only
     num_timesteps: int = 0  # Diffusion / TF-Diffusion only
     context_dim: int = 0        # TF-Diffusion only: hidden size of the text encoder
@@ -143,6 +149,7 @@ class ModelEntry:
     num_params: int = 0
     num_params_m: float = 0.0
     encoder_name: str = ""      # Transformer Diffusion: name of the frozen encoder
+    text_encoder_name: str = ""  # DiT: optional pretrained text encoder
     epochs_trained: int = 0
     last_loss: float = 0.0
     is_loaded: bool = False
@@ -161,8 +168,12 @@ class ModelEntry:
         self.channels = int(metadata.get("channels", 0))
         self.num_timesteps = int(metadata.get("num_timesteps", 0))
         self.context_dim = int(metadata.get("context_dim", 0))
+        self.recurrent_depth = int(metadata.get("recurrent_depth", 1))
+        self.moe_experts = int(metadata.get("moe_experts", 0))
+        self.moe_active = int(metadata.get("moe_active", 1))
         self.cross_attn_heads = int(metadata.get("cross_attn_heads", 0))
         self.encoder_name = str(metadata.get("encoder_name", "")) or "Unknown"
+        self.text_encoder_name = str(metadata.get("text_encoder_name", "") or "")
 
         if self.model_type == "transformer":
             self.nhead = int(metadata.get("nhead", 0))
@@ -198,6 +209,22 @@ class ModelRegistry:
             if not model_dir.is_dir():
                 continue
             self._register_directory(model_dir)
+
+        # The product exposes only recurrent-depth DiT and TF-Diffusion.
+        # Keep legacy checkpoints on disk, but do not surface plain Transformer
+        # or classic Diffusion models anywhere in the application.
+        if self.default_transformer not in self.models or (
+            self.models.get(self.default_transformer) and
+            self.models[self.default_transformer].recurrent_depth <= 1 and
+            self.models[self.default_transformer].moe_experts <= 0
+        ):
+            dit_names = [m.name for m in self.get_by_type("transformer")
+                         if m.recurrent_depth > 1 or m.moe_experts > 0]
+            self.default_transformer = dit_names[0] if dit_names else None
+        self.default_diffusion = None
+        if self.default_tf_diffusion not in self.models:
+            tf_names = [m.name for m in self.get_by_type("transformer_diffusion")]
+            self.default_tf_diffusion = tf_names[0] if tf_names else None
         
         return list(self.models.values())
     
@@ -217,6 +244,11 @@ class ModelRegistry:
         else:
             logger.warning("Modell '%s' uebersprungen: Checkpoint nicht lesbar", name)
             model_type = "transformer"
+
+        if model_type == "diffusion":
+            return
+        if model_type == "transformer" and int(metadata.get("recurrent_depth", 1)) <= 1 and int(metadata.get("moe_experts", 0)) <= 0:
+            return
 
         entry = ModelEntry(
             name=name,

@@ -142,6 +142,7 @@ TRANSLATIONS = {
     "grad_accum_status": {"en": "split: {steps} x {micro} samples per step ({batch} in total)", "de": "Aufteilung: {steps} x {micro} Beispiele pro Schritt ({batch} gesamt)"},
     "progress": {"en": "Progress:", "de": "Fortschritt:"},
     "btn_train_transformer": {"en": "Train Transformer", "de": "Transformer trainieren"},
+    "btn_train_dit": {"en": "Train DiT", "de": "DiT trainieren"},
     "btn_train_diffusion": {"en": "Train Diffusion", "de": "Diffusion trainieren"},
     "btn_train_tf_diffusion": {"en": "Train TF-Diffusion", "de": "TF-Diffusion trainieren"},
     "btn_stop_save": {"en": "Stop & Save", "de": "Stop & Speichern"},
@@ -201,7 +202,7 @@ TRANSLATIONS = {
     "about_frozen_encoder": {"en": "     - Frozen pre-trained Text Encoder (Phi-3.5, Gemma 2/3, Flan-T5)", "de": "     - Frozen pre-trained Text Encoder (Phi-3.5, Gemma 2/3, Flan-T5)"},
     "about_cross_attn": {"en": "     - Cross-Attention instead of Average Pooling", "de": "     - Cross-Attention statt Average Pooling"},
     "about_3d_unet": {"en": "     - 3D UNet with discrete Denoising Diffusion", "de": "     - 3D UNet mit diskreter Denoising Diffusion"},
-    "about_transformer": {"en": "  - Transformer Model (Single-Pass)", "de": "  - Transformer Modell (Single-Pass)"},
+    "about_transformer": {"en": "  - Recurrent-depth DiT with local window attention and optional MoE", "de": "  - Recurrent-Depth-DiT mit lokaler Fenster-Attention und optionalem MoE"},
     "about_diffusion": {"en": "  - 3D Diffusion Model (discrete Denoising)", "de": "  - 3D Diffusion Modell (diskrete Denoising)"},
     "about_3d_preview": {"en": "  - 3D Voxel Preview (freely rotatable with mouse, zoomable)", "de": "  - 3D Voxel-Vorschau (frei drehbar mit Maus, zoombar)"},
     "about_text_to_struct": {"en": "  - Text-to-Structure Generation", "de": "  - Text-zu-Struktur Generierung"},
@@ -290,6 +291,7 @@ TRANSLATIONS = {
     "adv_nhead": {"en": "nhead (Attention Heads)", "de": "nhead (Attention Heads)"},
     "adv_layers": {"en": "Layers (Decoder Levels)", "de": "Layers (Decoder-Ebenen)"},
     "adv_ff_ratio": {"en": "FFN Multiplier", "de": "FFN Multiplikator"},
+    "attention_window": {"en": "Voxel self-attention", "de": "Voxel-Self-Attention"},
 
     # --- Train More dialog labels ---
     "tm_epochs": {"en": "Epochs:", "de": "Epochen:"},

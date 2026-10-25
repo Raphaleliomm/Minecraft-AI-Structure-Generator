@@ -39,6 +39,8 @@ Beispiele:
 from __future__ import annotations
 
 import argparse
+import copy
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import gzip
 import hashlib
 import html as html_module
@@ -55,7 +57,7 @@ import urllib.robotparser
 import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Iterator
 
 try:
@@ -921,12 +923,12 @@ class HuggingFaceSource(BaseSource):
             response = client.get(url)
             try:
                 payload = response.json()
+                link = response.headers.get("Link", "")
             finally:
                 response.close()
             if not isinstance(payload, list):
                 raise ScrapeError(f"Unerwartete Tree-Antwort fuer {self.dataset}")
             entries.extend(payload)
-            link = response.headers.get("Link", "")
             match = re.search(r'<([^>]+)>;\s*rel="next"', link)
             url = match.group(1) if match else ""
         return entries
@@ -936,14 +938,14 @@ class HuggingFaceSource(BaseSource):
         raw_files = [
             entry for entry in tree
             if entry.get("type") == "file"
-            and entry.get("path", "").startswith("schematics/")
-            and Path(entry["path"]).suffix.lower() in {".schem", ".schematic", ".litematic"}
+            and PurePosixPath(str(entry.get("path", ""))).parts[:1] == ("schematics",)
+            and PurePosixPath(str(entry["path"])).suffix.lower() in {".schem", ".schematic", ".litematic"}
         ]
         blueprint_files = [
             entry for entry in tree
             if entry.get("type") == "file"
-            and entry.get("path", "").startswith("blueprints/")
-            and entry.get("path", "").endswith(".json")
+            and PurePosixPath(str(entry.get("path", ""))).parts[:1] == ("blueprints",)
+            and PurePosixPath(str(entry["path"])).suffix.lower() == ".json"
         ]
         print(
             f"  Hugging Face: {len(raw_files)} Rohdateien, "
@@ -982,7 +984,7 @@ class HuggingFaceSource(BaseSource):
         if not args.blueprints_only:
             for entry in raw_files:
                 path = entry["path"]
-                filename = urllib.parse.unquote(Path(path).name)
+                filename = urllib.parse.unquote(PurePosixPath(path).name)
                 meta = mapping.get(filename) or mapping.get(Path(filename).name) or {}
                 title = str(meta.get("name") or Path(filename).stem).strip()
                 description = str(meta.get("description") or "").strip()
@@ -990,7 +992,7 @@ class HuggingFaceSource(BaseSource):
                 refs.append(
                     ItemRef(
                         source_id=f"raw:{path}",
-                        url=f"{self.base}/resolve/main/{path}",
+                        url=f"{self.base}/resolve/main/{urllib.parse.quote(path, safe='/')}",
                         kind="raw",
                         title=title,
                         description=description,
@@ -1004,7 +1006,7 @@ class HuggingFaceSource(BaseSource):
         if not args.no_blueprints:
             for entry in blueprint_files:
                 path = entry["path"]
-                filename = Path(path).name
+                filename = PurePosixPath(path).name
                 if not args.blueprints_only and Path(filename).stem in raw_stems:
                     continue  # Rohdatei ist vorhanden und wird bereits verarbeitet
                 meta = blueprint_meta.get(filename, {})
@@ -1013,7 +1015,7 @@ class HuggingFaceSource(BaseSource):
                 refs.append(
                     ItemRef(
                         source_id=f"blueprint:{path}",
-                        url=f"{self.base}/resolve/main/{path}",
+                        url=f"{self.base}/resolve/main/{urllib.parse.quote(path, safe='/')}",
                         kind="blueprint",
                         title=title,
                         description="",
@@ -1383,11 +1385,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-items", type=int, default=0, help="Pro Quelle maximal N neue Eintraege verarbeiten (0 = alle)")
     parser.add_argument("--limit", type=int, default=0, help="Lauf nach N verarbeiteten Eintraegen beenden (0 = kein Limit)")
     parser.add_argument("--delay", type=float, default=1.5, help="Pause zwischen Requests in Sekunden")
+    parser.add_argument("--workers", type=int, default=3, help="Quellen parallel abarbeiten (1 = nacheinander)")
     parser.add_argument("--jitter", type=float, default=0.8, help="Zufaelliger Zusatz zur Pause")
     parser.add_argument("--timeout", type=float, default=60.0, help="HTTP-Timeout in Sekunden")
     parser.add_argument("--retries", type=int, default=4, help="Wiederholungen bei 429/5xx/Cloudflare")
-    parser.add_argument("--max-file-mb", type=float, default=250.0, help="Groessere Dateien ueberspringen (0 = kein Limit)")
-    parser.add_argument("--max-voxels", type=int, default=20_000_000, help="Strukturen ueber N Voxel ueberspringen (0 = kein Limit)")
+    parser.add_argument("--max-file-mb", type=float, default=0, help="Maximale Quelldateigroesse in MB (0 = kein Limit)")
+    parser.add_argument("--max-voxels", type=int, default=0, help="Maximale Voxelzahl pro Struktur (0 = kein Limit)")
     parser.add_argument("--order", choices=("source", "shuffle", "reverse"), default="source", help="Reihenfolge der Eintraege")
     parser.add_argument("--metadata-only", action="store_true", help="Nur Metadaten/Prompts, keine Strukturdateien")
     parser.add_argument("--redownload", action="store_true", help="Vorhandene Dateien erneut laden")
@@ -1533,10 +1536,10 @@ def run_source(
             record["ok"] = not record.get("errors") and (args.metadata_only or bool(result.files))
             if record.get("terminal"):
                 record["ok"] = True
-        except (ScrapeError, StructureConversionError, OSError, ValueError, json.JSONDecodeError) as exc:
+        except Exception as exc:
             record = source.base_record(ref)
             record["ok"] = False
-            record["errors"] = [str(exc)]
+            record["errors"] = [f"{type(exc).__name__}: {exc}"]
             key = ref.source_id
 
         records[key] = record
@@ -1594,33 +1597,61 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Quellen   : {', '.join(source.name for source in sources)}")
     print(f"Ziel      : {out_root.resolve()}")
     print(f"Rate-Limit: {args.delay}s + {args.jitter}s Jitter | Retries: {args.retries}")
+    print(f"Parallel sources: {max(1, args.workers) if args.limit <= 0 else 1}")
     print(f"Modus     : {'nur Metadaten' if args.metadata_only else 'Metadaten + Strukturen'}")
 
-    client = HttpClient(
-        delay=args.delay,
-        jitter=args.jitter,
-        timeout=args.timeout,
-        retries=args.retries,
-    )
-    robots = RobotsPolicy(client, USER_AGENT, enabled=not args.ignore_robots)
+    client = HttpClient(delay=args.delay, jitter=args.jitter, timeout=args.timeout, retries=args.retries)
     if args.ignore_robots:
         print("WARNUNG: --ignore-robots aktiv - die Seitenbetreiber werden nicht respektiert.")
 
     totals = {"new": 0, "skipped": 0, "failed": 0, "files": 0, "bytes": 0}
     processed_total = 0
     interrupted = False
+    request_counts = {"requests": 0, "retries": 0}
+
+    def scrape_one(source: BaseSource, remaining: int = 0):
+        worker_client = HttpClient(delay=args.delay, jitter=args.jitter, timeout=args.timeout, retries=args.retries)
+        try:
+            worker_robots = RobotsPolicy(worker_client, USER_AGENT, enabled=not args.ignore_robots)
+            counters, processed, records = run_source(source, copy.copy(args), worker_client, worker_robots, remaining=remaining)
+            return source.name, counters, processed, records, worker_client.request_count, worker_client.retry_count
+        finally:
+            worker_client.close()
+
     try:
-        for source in sources:
-            remaining = max(0, args.limit - processed_total) if args.limit > 0 else 0
-            counters, processed, _ = run_source(
-                source, args, client, robots, remaining=remaining
-            )
-            for key in totals:
-                totals[key] += counters[key]
-            processed_total += processed
-            if args.limit > 0 and processed_total >= args.limit:
-                print(f"\nGesamtlimit von {args.limit} Eintraegen erreicht.")
-                break
+        # The overall limit is applied serially to keep its meaning exact. Full
+        # scrapes run source directories concurrently and each source owns its
+        # HTTP session, metadata file and resume state.
+        if args.limit > 0 or args.workers <= 1 or len(sources) <= 1:
+            for source in sources:
+                remaining = max(0, args.limit - processed_total) if args.limit > 0 else 0
+                if args.limit > 0 and remaining == 0:
+                    print(f"\nGesamtlimit von {args.limit} Eintraegen erreicht.")
+                    break
+                _, counters, processed, _, requests, retries = scrape_one(source, remaining)
+                for key in totals:
+                    totals[key] += counters[key]
+                processed_total += processed
+                request_counts["requests"] += requests
+                request_counts["retries"] += retries
+                if args.limit > 0 and processed_total >= args.limit:
+                    print(f"\nGesamtlimit von {args.limit} Eintraegen erreicht.")
+                    break
+        else:
+            with ThreadPoolExecutor(max_workers=min(max(1, args.workers), len(sources))) as pool:
+                futures = [pool.submit(scrape_one, source) for source in sources]
+                for future in as_completed(futures):
+                    try:
+                        _, counters, processed, _, requests, retries = future.result()
+                    except Exception as exc:
+                        print(f"\nQuelle fehlgeschlagen: {type(exc).__name__}: {exc}")
+                        totals["failed"] += 1
+                        continue
+                    for key in totals:
+                        totals[key] += counters[key]
+                    processed_total += processed
+                    request_counts["requests"] += requests
+                    request_counts["retries"] += retries
     except KeyboardInterrupt:
         interrupted = True
         print("\nAbgebrochen (Strg+C). Resume: denselben Befehl erneut starten.")
@@ -1633,7 +1664,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  uebersprungen                 : {totals['skipped']}")
     print(f"  Fehler                        : {totals['failed']}")
     print(f"  Dateien                       : {totals['files']} ({totals['bytes'] / 1024 / 1024:.1f} MB)")
-    print(f"  HTTP-Requests                 : {client.request_count} (Retries: {client.retry_count})")
+    print(f"  HTTP-Requests                 : {request_counts['requests']} (Retries: {request_counts['retries']})")
     print(f"  Ausgabe                       : {out_root.resolve()}")
     if not args.metadata_only:
         print(

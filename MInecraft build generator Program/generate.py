@@ -81,6 +81,10 @@ def main() -> None:
         num_layers=checkpoint["layers"],
         dim_feedforward=checkpoint.get("dim_feedforward", 1024),
         dropout=0.0,
+        recurrent_depth=checkpoint.get("recurrent_depth", 1),
+        moe_experts=checkpoint.get("moe_experts", 0),
+        moe_active=checkpoint.get("moe_active", 1),
+        window_size=checkpoint.get("window_size", 0),
     ).to(args.device)
     model.load_state_dict(checkpoint["model_state"])
 
@@ -92,7 +96,9 @@ def main() -> None:
     attn_bytes, rest_bytes = transformer_generation_bytes(
         grid_size, 1, model.block_vocab_size, checkpoint["d_model"],
         checkpoint.get("nhead", 8), checkpoint["layers"],
-        checkpoint.get("dim_feedforward", 1024))
+        checkpoint.get("dim_feedforward", 1024),
+        window_size=model.window_size,
+        recurrent_depth=model.recurrent_depth if model.decoder is None else 1)
     plan = plan_generation(grid_size, model.block_vocab_size,
                            device=torch.device(args.device),
                            activation_bytes=attn_bytes + rest_bytes)

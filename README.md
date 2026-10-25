@@ -1,13 +1,13 @@
 # Minecraft AI Structure Generator
 
 PyTorch-basierte Pipeline zur Generierung von Minecraft-Strukturen aus Text-Prompts.
-Unterstützt mehrere Architekturen: Shared-Weight-Transformer, Diffusion-Modelle und
-pre-trained Text-Encoder (Phi-3.5, Gemma 2/3, Flan-T5).
+Unterstützt Recurrent-Depth DiT mit optionalem MoE und wahlweise gelernten
+Prompt-Embeddings oder einem vortrainierten Text-Encoder sowie TF-Diffusion.
 
 ## Features
 
 - **Text-zu-Bauwerk**: Generiere Minecraft-Strukturen aus natürlicher Sprache
-- **Multi-Architektur**: Wähle zwischen Transformer, Diffusion oder TF-Diffusion (Empfohlen: TF-Diffusion)
+- **Multi-Architektur**: Recurrent-Depth DiT oder TF-Diffusion
 - **GUI-Anwendung**: Benutzerfreundliche Oberfläche mit CustomTkinter
 - **3D-Vorschau**: Echtzeit-3D-Ansicht generierter Bauwerke (pyglet/OpenGL)
 - **Training**: Integriertes Training mit Augmentierung, Sampling-Gewichten und mehr
@@ -59,9 +59,9 @@ verwendet (rekursiv, also auch verschachtelte Datensätze).
 │   ├── voxel_viewer_3d.py        # 3D-Viewer (pyglet/OpenGL, eigener Prozess)
 │   └── litematic.py              # .litematic/Blueprint -> Sponge-.schem
 ├── dataset.py                    # .schem/.schematic Import, Tokenizer, Augmentierung
-├── model.py                      # Shared-Weight-Voxel-Transformer (Single-Pass)
-├── train.py                      # Kommandozeilen-Training (Transformer)
-├── generate.py                   # Kommandozeilen-Generierung (Transformer)
+├── model.py                      # DiT mit lokalen Fenstern, Routing und optionalem MoE
+├── train.py                      # Kommandozeilen-Training (DiT)
+├── generate.py                   # Kommandozeilen-Generierung (DiT)
 ├── filter_dataset.py             # Dataset-Filterung nach Größe
 ├── scrape_phantommarket.py       # Dataset-Scraper (market.phantom-node.com)
 ├── scrape_structures.py          # Mehrquellen-Scraper (Abfielder, Hugging Face)
@@ -93,17 +93,24 @@ verwendet (rekursiv, also auch verschachtelte Datensätze).
 
 ## Architekturen
 
-### Shared-Weight-Transformer (`model.py`)
-Kompakter Single-Pass Transformer, der im Forward Pass direkt das gesamte Voxel-Grid
-generiert. Verwendet Cross-Attention über den encodierten Prompt.
+### Per-Token Recurrent-Depth DiT (`model.py`)
 
-Training mit gewichteter Cross-Entropy und adaptiven per-structure Gewichten.
+DiT wiederverwendet einen Decoder-Block. Ein gelernter Router entscheidet für
+jede Voxel-Position separat, ob sie eine weitere Rekursion durchläuft. In der
+Konfiguration wird nur die maximale Tiefe festgelegt; einzelne Tokens können
+früher anhalten. Für Prompts kann es entweder eigene Embeddings lernen oder
+Repräsentationen eines eingefrorenen vortrainierten Text-Encoders (Phi-3.5,
+Gemma oder T5) verwenden.
+Erzeugt das Voxel-Grid mit einem gemeinsam genutzten, wiederholt angewendeten
+Decoderblock. Optionales Top-k-MoE erlaubt die Wahl der Gesamtzahl und aktiven
+Experten; aktive und gesamte Parameter werden angezeigt. Die Self-Attention
+arbeitet standardmäßig in überlappenden 8³-Fenstern. TREAD-inspiriertes Token-
+Routing und SSA-inspirierter räumlicher Kontext sind standardmäßig aktiviert.
 
-### Diffusion Model (`app/diffusion_model.py`)
-Denoising-Diffusion-Probabilistic-Model (DDPM) für Voxelgitter.
-Verwendet feste Architektur: d_model=128, d_text=64, channels=64, (1,2,2).
+Training mit gewichteter Cross-Entropy und adaptiven Strukturgewichten. Die
+Standardtiefe beträgt 4; Training ist ab Tiefe 2 als DiT konfiguriert.
 
-### Transformer Diffusion (`app/diffusion_model.py`)
+### TF-Diffusion (`app/diffusion_model.py`)
 Hybrides Modell mit gefrorenem pre-trained Text-Encoder und 3D UNet
 mit Cross-Attention. Unterstützt Phi-3.5, Gemma 2/3 und Flan-T5.
 
@@ -116,7 +123,14 @@ Unterstützte Modelle (alle Gewichte frozen):
 
 ## GUI-Funktionen
 
-- **Modellauswahl**: Transformer, Diffusion oder TF-Diffusion, verschiedene Checkpoints
+- **Modellauswahl**: DiT mit optionalem MoE oder TF-Diffusion
+- **DiT-Text-Eingabe**: gelernte Embeddings oder gefrorener Text-Encoder
+- **Voxel-Self-Attention**: überlappende Fenster mit 4³, 8³ oder 16³ Voxeln;
+  globale Attention ist ebenfalls auswählbar
+- **DiT-Routing**: maximale Rekursionstiefe pro Token, TREAD-inspiriertes
+  Token-Routing und SSA-inspirierter räumlicher Kontext standardmäßig aktiv
+- **Batch-Größe**: Standard 16; VRAM-Planung teilt den Batch bei Bedarf auf
+  Mikro-Batches auf
 - **Grid-Größe**: 16×16×16, 32×32×32, 48×48×48, 64×64×64, 96×96×96, 128×128×128, 256×256×256 (96×96×96+ ist experimentell)
 - **Temperatur & Top-K**: Steuerung der Generierungs-Zufälligkeit
 - **3D-Vorschau**: Orbit-Kamera (Maus ziehen = rotieren, Scrollen = zoomen)
@@ -239,11 +253,10 @@ Was der Plan tut:
 * **Klare Meldung bei „passt nie“.** Grid 256³ passt auch mit Batch 1 nicht;
   der Plan meldet dann den größten Verursacher (Aktivierungen oder Parameter)
   samt Vorschlag für ein kleineres Grid.
-* **Attention-Limit beim Transformer.** Beim Shared-Weight-Transformer
-  (`model.py`) läuft die Self-Attention über **alle** Voxel und ist nicht
-  chunkbar; bei 32³ sind das 6 · 32768² · 4 Byte = 24 GiB pro Matrix und Layer.
-  Statt eines CUDA-Fehlers kommt dort ein Hinweis mit dem größten noch
-  passenden Grid.
+* **Attention-Planung beim DiT.** Die VRAM-Schätzung berücksichtigt die
+  gewählte Fenstergröße (standardmäßig 8³), rekurrente Tiefe und den
+  Prompt-Cross-Attention-Speicher. Bei globaler Attention (`0`) wächst die
+  Self-Attention quadratisch mit der Voxelzahl.
 
 Abschaltbar bzw. übersteuerbar per Umgebungsvariable:
 
@@ -288,7 +301,7 @@ Was deshalb passiert:
   fehlgeschlagenen Modellaufbau und vor der Messung des freien Speichers läuft
   `torch.cuda.empty_cache()` (`release_cuda_cache()` in `app/main_app.py`).
 * **Klare Meldung statt Absturz.** Passt selbst der kleinste Chunk nicht
-  (z. B. Grid 64³ mit der quadratischen Self-Attention des Transformers), nennt
+  (z. B. Grid 64³ mit globaler quadratischer Self-Attention im DiT), nennt
   die Statuszeile den größten Verursacher und ein Grid, das passen würde.
 * **Das Sampling bleibt unverändert.** Chunking erzeugt bitgleiche Logits
   (getestet mit deterministischem Sampling über `top_k=1`/Argmax,
@@ -326,7 +339,7 @@ python generate.py "small medieval cottage" --model-size 32 --chunk-voxels 512  
 
 ## Training (GUI)
 
-1. Modellarchitektur wählen (Transformer, Diffusion oder TF-Diffusion)
+1. Modellarchitektur wählen (DiT oder TF-Diffusion)
 2. Trainingsdaten-Ordner werden automatisch erkannt (siehe unten), rekursiv
 3. Grid-Größe, Epochen, Lernrate einstellen
 4. Augmentierung aktivieren (Rotation, Verschiebung, vertikale Bewegung)
@@ -442,7 +455,10 @@ python scrape_structures.py --source mc_schematics --max-items 100 --delay 2
 # Nur die 669 JSON-Blueprints rekonstruieren
 python scrape_structures.py --source huggingface --blueprints-only
 
-# Beide Quellen, insgesamt max. 500 neue Einträge
+# Alle Quellen parallel (resumierbar; bis zu 3 Quellen gleichzeitig)
+python scrape_structures.py --source all --workers 3
+
+# Alle Quellen, insgesamt max. 500 neue Einträge (seriell für exaktes Limit)
 python scrape_structures.py --source all --max-items 500
 
 # prompts.json nachträglich aus structures_meta.jsonl neu schreiben

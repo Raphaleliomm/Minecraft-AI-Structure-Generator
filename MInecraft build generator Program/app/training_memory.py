@@ -71,8 +71,8 @@ CPU_BUDGET_BYTES = 2 * GIB
 MIN_CHUNK_VOXELS = 32
 # Gewichte + Gradienten + Adam-Zustaende (2 Momente) je Parameter.
 PARAM_STATE_FACTOR = 3
-# Self-Attention des VoxelTransformers: pro Layer bleibt die Softmax-Ausgabe
-# fuer den Backward-Pass erhalten, dazu eine transiente Kopie.
+# Lokale Fenster-Self-Attention des VoxelTransformers: pro Layer bleibt die
+# Softmax-Ausgabe fuer den Backward-Pass erhalten, dazu eine transiente Kopie.
 ATTENTION_TRANSIENT_COPIES = 1.0
 # Bei der Generierung gibt es keinen Rueckwaerts-Pass (keine Gradienten, keine
 # Log-Softmax-Kopie fuer autograd, keine Adam-Zustaende) - die Aktivierungen
@@ -297,9 +297,29 @@ def logits_bytes(batch_size: int, num_blocks: int, voxels: int,
 
 def attention_bytes(batch_size: int, nhead: int, voxels: int,
                     context_len: int, item_bytes: int = 4) -> int:
-    """Bytes einer Attention-Matrix ``[B, heads, Voxel, Text]``."""
+    """Bytes einer Attention-Matrix ``[B, heads, Query, Key]``."""
     return (max(1, int(batch_size)) * max(1, int(nhead)) * max(1, int(voxels))
             * max(1, int(context_len)) * int(item_bytes))
+
+
+def local_window_attention_bytes(grid_size: Tuple[int, int, int], batch_size: int,
+                                 nhead: int, window_size: int = 8,
+                                 item_bytes: int = 4) -> int:
+    """Score-Matrix-Speicher fuer nicht ueberlappende 3D-Fenster.
+
+    Padding auf Fenstergrenzen wird mitgezaehlt. Fenster 0 steht fuer globale
+    Attention; alle angebotenen Trainingsgrids sind durch lokale Fenster bis
+    16 teilbar.
+    """
+    win = max(0, int(window_size))
+    voxels = voxel_count(grid_size)
+    if win == 0:
+        return attention_bytes(batch_size, nhead, voxels, voxels, item_bytes)
+    padded_voxels = 1
+    for side in grid_size:
+        padded_voxels *= ((int(side) + win - 1) // win) * win
+    return attention_bytes(batch_size, nhead, padded_voxels,
+                           win ** 3, item_bytes)
 
 
 
@@ -596,22 +616,26 @@ def _transformer_layer_bytes(d_model: int, num_layers: int,
 def transformer_estimates(grid_size: Tuple[int, int, int], batch: int,
                           block_vocab_size: int, d_model: int, nhead: int,
                           num_layers: int, dim_feedforward: int,
-                          item_bytes: int = 4) -> Tuple[int, int, int]:
+                          item_bytes: int = 4, window_size: int = 8,
+                          recurrent_depth: int = 1) -> Tuple[int, int, int]:
     """(Attention-Bytes, Logits-Bytes, Rest) fuer den VoxelTransformer.
 
-    Die Self-Attention laeuft ueber ALLE Voxel und ist nicht chunkbar, deshalb
-    ist sie der harte Engpass: bei Grid 32^3 sind das 6 Heads * 32768^2 * 4 Byte
-    = 24 GiB pro Matrix und Layer. Gerechnet wird eine Matrix je Layer plus eine
-    transiente Kopie (``ATTENTION_TRANSIENT_COPIES``) - Grid 16^3 kostet 64x
-    weniger.
+    Self-Attention laeuft lokal oder global gemaess ``window_size``. Gerechnet
+    wird eine Score-Matrix je ausgefuehrtem Layer plus eine transiente Kopie.
     """
     voxels = voxel_count(grid_size)
-    matrix = attention_bytes(batch, nhead, voxels, voxels, item_bytes)
-    attn = int(matrix * (max(1, int(num_layers)) * 1.0 + ATTENTION_TRANSIENT_COPIES))
+    matrix = local_window_attention_bytes(grid_size, batch, nhead,
+                                          window_size, item_bytes)
+    cross_matrix = attention_bytes(batch, nhead, voxels,
+                                   GENERATION_CONTEXT_TOKENS, item_bytes)
+    attention_layers = max(1, int(recurrent_depth)) if recurrent_depth > 1 else max(1, int(num_layers))
+    attn = int((matrix + cross_matrix)
+               * (attention_layers + ATTENTION_TRANSIENT_COPIES))
     logits = logits_bytes(batch, block_vocab_size, voxels, item_bytes)
     embeddings = ((block_vocab_size + 1) * d_model + voxels * d_model
                   + 2 * d_model)
-    states = (_transformer_layer_bytes(d_model, num_layers, dim_feedforward)
+    parameter_layers = 1 if recurrent_depth > 1 else max(1, int(num_layers))
+    states = (_transformer_layer_bytes(d_model, parameter_layers, dim_feedforward)
               + embeddings * 4) * PARAM_STATE_FACTOR
     sequence = batch * voxels * d_model * item_bytes
     return attn, logits, states + sequence
@@ -627,6 +651,8 @@ def plan_transformer_training(
     nhead: int = 6,
     num_layers: int = 5,
     dim_feedforward: int = 768,
+    window_size: int = 8,
+    recurrent_depth: int = 1,
     item_bytes: int = 4,
     safety_fraction: float = DEFAULT_SAFETY_FRACTION,
     reserve_bytes: int = 0,
@@ -635,9 +661,8 @@ def plan_transformer_training(
 ) -> TrainingPlan:
     """Plan fuer den Shared-Weight-Transformer (Grid-Limit + Batch-Reduktion).
 
-    Hier ist die Self-Attention ``[B, heads, Voxel, Voxel]`` der Engpass - sie
-    laesst sich nicht chunken, waechst aber (wie der Rest) mit der Batch-Groesse.
-    Der Plan reduziert deshalb die *physische* Batch-Groesse; mit
+    Self-Attention wird als lokale Fenster-Attention veranschlagt. Der Plan
+    reduziert die *physische* Batch-Groesse, falls noetig; mit
     ``allow_accumulation`` (Standard) haelt ``accum_steps`` die effektive
     Batch-Groesse dabei (siehe ``app/grad_accum.py``).
 
@@ -651,14 +676,21 @@ def plan_transformer_training(
         attn, logits, rest = transformer_estimates(grid_size, batch,
                                                    block_vocab_size, d_model,
                                                    nhead, num_layers,
-                                                   dim_feedforward, item_bytes)
+                                                   dim_feedforward, item_bytes,
+                                                   window_size, recurrent_depth)
+        chunk = plan_chunk_voxels(
+            voxels, batch, block_vocab_size,
+            info.budget_bytes - attn - rest, item_bytes,
+        )
+        chunk_logits = int(logits_bytes(batch, block_vocab_size, chunk, item_bytes)
+                           * CHUNK_OVERHEAD)
         return TrainingPlan(
             batch_size=batch, requested_batch_size=requested,
-            chunk_voxels=voxels, voxels=voxels, logits_bytes=logits,
+            chunk_voxels=chunk, voxels=voxels, logits_bytes=logits,
             activation_bytes=attn, param_bytes=rest,
-            estimated_bytes=attn + logits + rest,
+            estimated_bytes=attn + chunk_logits + rest,
             budget_bytes=info.budget_bytes, available_bytes=info.free_bytes,
-            fits=attn + logits + rest <= info.budget_bytes, limit="ok",
+            fits=attn + chunk_logits + rest <= info.budget_bytes, limit="ok",
         )
 
     if not guard_enabled():
@@ -687,12 +719,15 @@ def plan_transformer_training(
             continue
         attn, logits, rest = transformer_estimates(grid, 1, block_vocab_size,
                                                    d_model, nhead, num_layers,
-                                                   dim_feedforward, item_bytes)
+                                                   dim_feedforward, item_bytes,
+                                                   window_size, recurrent_depth)
         if attn + logits + rest <= info.budget_bytes:
             hint = f"{grid[0]}x{grid[1]}x{grid[2]}"
     return replace(plan, limit="attention", suggestion=(
-        f"Attention-Matrix {format_gib(plan.activation_bytes)} GiB "
-        f"(waechst mit Voxel^2, nicht chunkbar)"
+        (f"Globale Attention {format_gib(plan.activation_bytes)} GiB"
+         if window_size == 0 else
+         f"Fenster-Attention {format_gib(plan.activation_bytes)} GiB "
+         f"(bei Fenster {window_size}^3)")
         + (f" - mit Batch 1 passend waere Grid {hint}" if hint else "")))
 
 
@@ -779,7 +814,8 @@ def unet_inference_bytes(batch_size: int, channels: int,
 def transformer_generation_bytes(grid_size: Tuple[int, int, int], batch_size: int,
                                  block_vocab_size: int, d_model: int, nhead: int,
                                  num_layers: int, dim_feedforward: int,
-                                 item_bytes: int = 4) -> Tuple[int, int]:
+                                 item_bytes: int = 4, window_size: int = 8,
+                                 recurrent_depth: int = 1) -> Tuple[int, int]:
     """(Attention-Bytes, Rest) fuer einen Vorwaerts-Lauf des VoxelTransformers.
 
     Wie :func:`transformer_estimates`, aber ohne Trainings-Zuschlaege: nur *eine*
@@ -787,10 +823,15 @@ def transformer_generation_bytes(grid_size: Tuple[int, int, int], batch_size: in
     Gewichte (keine Gradienten, keine Adam-Zustaende).
     """
     voxels = voxel_count(grid_size)
-    attn = attention_bytes(batch_size, nhead, voxels, voxels,
-                           item_bytes) * max(1, int(num_layers))
+    attention_layers = (max(1, int(recurrent_depth)) if recurrent_depth > 1
+                        else max(1, int(num_layers)))
+    attn = (local_window_attention_bytes(grid_size, batch_size, nhead,
+                                         window_size, item_bytes)
+            + attention_bytes(batch_size, nhead, voxels,
+                              GENERATION_CONTEXT_TOKENS, item_bytes)) * attention_layers
     embeddings = ((block_vocab_size + 1) * d_model + voxels * d_model + 2 * d_model) * 4
-    states = _transformer_layer_bytes(d_model, num_layers, dim_feedforward) + embeddings
+    parameter_layers = 1 if recurrent_depth > 1 else max(1, int(num_layers))
+    states = _transformer_layer_bytes(d_model, parameter_layers, dim_feedforward) + embeddings
     sequence = max(1, int(batch_size)) * voxels * d_model * item_bytes
     return int(attn), int(states + sequence)
 

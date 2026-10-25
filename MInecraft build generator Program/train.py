@@ -15,6 +15,7 @@ from app.grad_accum import (
     per_sample_weight_mass,
 )
 from app.paths import default_data_dirs
+from app.transformer_encoder import MODEL_NAMES, FrozenTransformerEncoder
 from app.training_memory import describe_training_plan, plan_transformer_training
 from dataset import MultiSourceSchematicDataset
 from model import SharedWeightVoxelTransformer
@@ -45,7 +46,7 @@ def main() -> None:
     parser.add_argument("--grid-size", type=parse_size, default=None,
                         help="DEPRECATED: Use --model-size instead. Grid size (16,16,16), (32,32,32) or (48,48,48).")
     parser.add_argument("--epochs", type=int, default=10)
-    parser.add_argument("--batch-size", type=int, default=4)
+    parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--no-grad-accum", dest="grad_accum", action="store_false",
                         default=accumulation_enabled(),
                         help="Wenn der Batch nicht in den VRAM passt: verkleinern statt "
@@ -56,6 +57,19 @@ def main() -> None:
     parser.add_argument("--nhead", type=int, default=6)
     parser.add_argument("--layers", type=int, default=5)
     parser.add_argument("--dim-feedforward", type=int, default=768)
+    parser.add_argument("--recurrent-depth", type=int, default=4, help="Maximum per-token recurrence depth for DiT (minimum 2)")
+    parser.add_argument("--window-size", type=int, choices=(0, 4, 8, 16), default=8,
+                        help="Self-attention: 4/8/16 voxel windows or 0 for global attention")
+    parser.add_argument("--tread-ratio", type=float, default=0.25,
+                        help="Fraction of voxel tokens routed around each DiT block (0 disables TREAD routing)")
+    parser.add_argument("--ssa-topk", type=int, default=16,
+                        help="Spatial windows selected per window for SSA global context (0 disables SSA)")
+    parser.add_argument("--voxel-mask-ratio", type=float, default=0.65,
+                        help="Fraction of air-target loss masked; all non-air targets are retained")
+    parser.add_argument("--moe-experts", type=int, default=0, help="MoE expert count; 0 disables MoE")
+    parser.add_argument("--moe-active", type=int, default=1, help="Top-k experts active per token")
+    parser.add_argument("--text-encoder", choices=MODEL_NAMES, default=None,
+                        help="Frozen pretrained text encoder; omit to learn prompt embeddings from scratch")
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--warmup-steps", type=int, default=500)
     parser.add_argument("--grad-clip", type=float, default=1.0)
@@ -67,6 +81,8 @@ def main() -> None:
     parser.add_argument("--allow-vertical-movement", action="store_true",
                         help="Allow augmented builds to move upward inside the training grid.")
     args = parser.parse_args()
+    if args.recurrent_depth < 2:
+        parser.error("DiT requires --recurrent-depth >= 2")
 
     # Grid-Größe bestimmen: --model-size hat Vorrang, sonst --grid-size (deprecated),
     # sonst Standard 16. Wichtig: --grid-size war zuvor unerreichbar, weil die "Nicht None für
@@ -122,17 +138,22 @@ def main() -> None:
     dataset.prompt_tokenizer.save(out_dir / "prompt_vocab.json")
     dataset.voxel_tokenizer.save(out_dir / "block_vocab.json")
 
+    text_encoder = None
+    if args.text_encoder:
+        text_encoder = FrozenTransformerEncoder(
+            model_name=args.text_encoder, device=device,
+            dtype=torch.float16 if device.type == "cuda" else torch.float32,
+        )
+
     # ── VRAM-Guard ──
-    # Der VoxelTransformer berechnet die Self-Attention ueber ALLE Voxel
-    # ([B, heads, Voxel, Voxel]) - bei Grid 32^3 sind das 6 * 32768^2 * 4 Byte
-    # = 24 GiB pro Matrix und Layer und das laesst sich nicht chunken. Frueher
-    # brach das Training erst mitten im ersten Batch mit "Cuda out of memory"
-    # ab; hier wird vorher gerechnet und die Batch-Groesse reduziert (bzw. mit
-    # klarer Meldung abgebrochen).
+    # Die Self-Attention laeuft standardmaessig in lokalen 3D-Fenstern (8^3);
+    # der Planer beruecksichtigt Fenster-Attention und Batch-Anpassungen.
     plan = plan_transformer_training(
         grid_size, args.batch_size, len(dataset.voxel_tokenizer.id_to_block),
         device=device, d_model=args.d_model, nhead=args.nhead,
         num_layers=args.layers, dim_feedforward=args.dim_feedforward,
+        recurrent_depth=max(1, args.recurrent_depth),
+        window_size=args.window_size,
         allow_accumulation=args.grad_accum,
     )
     print(describe_training_plan(plan, "de"))
@@ -167,6 +188,11 @@ def main() -> None:
         num_layers=args.layers,
         dim_feedforward=args.dim_feedforward,
         dropout=args.dropout,
+        recurrent_depth=max(1, args.recurrent_depth),
+        window_size=args.window_size,
+        moe_experts=max(0, args.moe_experts), moe_active=max(1, args.moe_active),
+        text_input_dim=int(text_encoder.hidden_dim) if text_encoder else 0,
+        text_encoder_name=args.text_encoder,
     ).to(device)
 
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -212,23 +238,26 @@ def main() -> None:
                 target = micro["voxel_ids"].to(device, non_blocking=True).reshape(prompt_ids.shape[0], -1)
                 target = model.safe_clamp_target(target)
 
-                logits = model(prompt_ids)
+                if text_encoder is not None:
+                    encoded = text_encoder(list(micro["prompt_text"]))
+                    model_inputs = {
+                        "prompt_embeddings": encoded["last_hidden_state"].to(
+                            device=device, dtype=next(model.parameters()).dtype),
+                        "prompt_attention_mask": encoded["attention_mask"].to(device),
+                    }
+                else:
+                    model_inputs = {"prompt_ids": prompt_ids}
                 # Adaptive per-structure weights (consistent with GUI)
-                target_flat = target.reshape(-1)
                 sample_weight = micro["sample_weight"].to(device, non_blocking=True).view(-1, 1)
-                sample_weight = sample_weight.expand_as(target).reshape(-1)
-                per_block_w = micro["per_block_weight"].to(device, non_blocking=True).view(-1, 1).expand_as(target).reshape(-1)
-                per_air_w = micro["per_air_weight"].to(device, non_blocking=True).view(-1, 1).expand_as(target).reshape(-1)
-                weight_per_token = torch.where(target_flat == 0, per_air_w, per_block_w) * sample_weight
-                logp = torch.log_softmax(logits.reshape(-1, logits.shape[-1]), dim=-1)
-                nll = torch.nn.functional.nll_loss(logp, target_flat, reduction='none')
-                loss = (nll * weight_per_token).sum() / weight_per_token.sum().clamp_min(1.0)
-
-                # Der Anteil am Gesamt-Batch skaliert nur den Gradienten; die
-                # angezeigte Verlustkurve bleibt der Mittelwert.
-                backward_loss = loss if share == 1.0 else loss * share
-                backward_loss.backward()
-                batch_loss += float(loss.detach()) * share
+                sample_weight = sample_weight.expand_as(target)
+                per_block_w = micro["per_block_weight"].to(device, non_blocking=True).view(-1, 1).expand_as(target)
+                per_air_w = micro["per_air_weight"].to(device, non_blocking=True).view(-1, 1).expand_as(target)
+                weight_per_token = torch.where(target == 0, per_air_w, per_block_w) * sample_weight
+                loss = model.backward_weighted_loss(
+                    target, weight_per_token, chunk_voxels=plan.chunk_voxels,
+                    grad_scale=share, **model_inputs,
+                )
+                batch_loss += loss * share
 
             if args.grad_clip > 0:
                 apply_optimizer_step(model, optimizer, max_norm=args.grad_clip)
@@ -259,6 +288,15 @@ def main() -> None:
                     "nhead": args.nhead,
                     "layers": args.layers,
                     "dim_feedforward": args.dim_feedforward,
+                    "recurrent_depth": model.recurrent_depth,
+                    "window_size": model.window_size,
+                    "tread_ratio": model.tread_ratio,
+                    "ssa_topk": model.ssa_topk,
+                    "voxel_mask_ratio": model.voxel_mask_ratio,
+                    "moe_experts": model.moe_experts,
+                    "moe_active": model.moe_active,
+                    "text_encoder_name": model.text_encoder_name,
+                    "text_input_dim": model.text_input_dim,
                     "data_dirs": [str(path) for path in data_dirs],
                     "max_voxels": args.max_voxels,
                     "augmentation_diversity": args.augmentation_diversity,

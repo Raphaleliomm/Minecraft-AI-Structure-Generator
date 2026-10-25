@@ -20,7 +20,7 @@ from app.transformer_encoder import DEFAULT_ENCODER_HIDDEN_DIM
 def create_kaggle_export(
     output_dir: Optional[str] = None,
     epochs: int = 30,
-    batch_size: int = 4,
+    batch_size: int = 16,
     learning_rate: float = 1.5e-3,
     aug_diversity: int = 1,
     allow_vertical: bool = False,
@@ -172,18 +172,16 @@ def _copy_source_files(export_dir: Path) -> None:
         "model.py",
         "dataset.py",
         "requirements.txt",
+        "kaggle_experiments.py",
     ]
 
     for fname in files_to_copy:
         src = src_dir / fname
-        if src.exists():
-            shutil.copy2(str(src), str(export_dir / fname))
-        else:
-            # Write a minimal stub so the notebook still works
-            (export_dir / fname).write_text(
-                f"# {fname} — automatically generated placeholder\n"
-                f"# The original was not found at {src.resolve()}\n"
+        if not src.is_file():
+            raise FileNotFoundError(
+                f"Kaggle-Export unvollständig: benötigte Quelldatei fehlt: {src}"
             )
+        shutil.copy2(str(src), str(export_dir / fname))
 
     # Copy the app/ directory (needed for diffusion_model.py, transformer_encoder.py, etc.)
     # __pycache__/.pyc are excluded: they would only bloat the upload (and may be
@@ -198,11 +196,21 @@ def _copy_source_files(export_dir: Path) -> None:
             ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".pytest_cache"),
         )
     else:
-        print(f"  Warnung: app/ nicht gefunden ({app_src}) - Export bleibt unvollstaendig")
+        raise FileNotFoundError(
+            f"Kaggle-Export unvollständig: benötigtes app/-Paket fehlt: {app_src}"
+        )
 
 
 def _package_training_data(export_dir: Path, data_dirs: List[str]) -> None:
     """Create an ASCII-named ZIP with schematic files and paired prompt sidecars."""
+    from dataset import discover_examples_many
+
+    prompted_examples = discover_examples_many(data_dirs)
+    if not prompted_examples:
+        raise ValueError(
+            "Keine prompt-annotierten .schem/.schematic-Dateien gefunden. "
+            "Prüfe Datenordner und prompts.json/.txt-Dateien vor dem Kaggle-Export."
+        )
     zip_path = export_dir / "training_data.zip"
     with zipfile.ZipFile(str(zip_path), "w", zipfile.ZIP_DEFLATED) as zf:
         for dir_path_str in data_dirs:
@@ -253,14 +261,51 @@ def _package_training_data(export_dir: Path, data_dirs: List[str]) -> None:
                     safe_stem = schematic_stems.get(key, safe_stem)
                 arcname = f"{safe_component(dir_path.name)}/{safe_stem}{path.suffix.lower()}"
                 zf.write(str(path), arcname)
-    print(f"  Training data ZIP created: {zip_path}")
+
+            # Some sources store prompt mappings only in prompts.json. The ZIP
+            # intentionally uses portable ASCII names, so preserve those prompts
+            # as sidecars keyed to each schematic instead of copying a JSON map
+            # whose original filenames may no longer match after sanitization.
+            try:
+                from dataset import discover_examples_many
+                mapped: dict[Path, list[str]] = {}
+                for schematic_path, prompt, _source in discover_examples_many([dir_path]):
+                    mapped.setdefault(schematic_path.resolve(), []).append(prompt)
+                existing_sidecars = {
+                    (p.parent.resolve(), p.stem.casefold())
+                    for p in files if p.suffix.lower() == ".txt"
+                }
+                for schematic_path, prompts in mapped.items():
+                    if (schematic_path.parent, schematic_path.stem.casefold()) in existing_sidecars:
+                        continue
+                    relative = schematic_path.relative_to(dir_path.resolve())
+                    raw_stem = relative.with_suffix("").as_posix()
+                    safe_stem = final_stems.get(raw_stem)
+                    if safe_stem:
+                        arcname = (f"{safe_component(dir_path.name)}/{safe_stem}.txt")
+                        content = "\n---\n".join(dict.fromkeys(prompts)) + "\n"
+                        zf.writestr(arcname, content.encode("utf-8"))
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Prompts aus {dir_path} konnten nicht sicher in das Kaggle-Archiv "
+                    "übernommen werden; Export wird abgebrochen, damit kein "
+                    "unvollständiger Trainingsdatensatz entsteht."
+                ) from exc
+    with zipfile.ZipFile(str(zip_path), "r") as zf:
+        packaged_structures = sum(
+            name.lower().endswith((".schem", ".schematic")) for name in zf.namelist()
+        )
+    if packaged_structures == 0:
+        raise ValueError("Kaggle-Datenarchiv enthält keine .schem/.schematic-Dateien.")
+    print(f"  Training data ZIP created: {zip_path} "
+          f"({packaged_structures} Schematics, {len(prompted_examples)} Prompt-Beispiele)")
 
 
 def _package_source_code(export_dir: Path) -> None:
     """Bundle Python source and app modules as a Kaggle input artifact."""
     archive_path = export_dir / "source_code.zip"
     with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        for name in ("train.py", "model.py", "dataset.py", "requirements.txt"):
+        for name in ("train.py", "model.py", "dataset.py", "requirements.txt", "kaggle_experiments.py"):
             source = export_dir / name
             if source.is_file():
                 zf.write(source, name)
@@ -297,6 +342,10 @@ def _create_notebook(
         nhead = int(arch.get('nhead', 6))
         num_layers = int(arch.get('num_layers', 5))
         dim_ff = int(arch.get('dim_feedforward', 768))
+        recurrent_depth = max(2, int(arch.get('recurrent_depth', 4)))
+        window_size = int(arch.get('window_size', 8))
+        moe_experts = max(0, int(arch.get('moe_experts', 0)))
+        moe_active = min(max(1, int(arch.get('moe_active', 1))), max(1, moe_experts))
     elif model_type == 'diffusion':
         d_model, nhead, num_layers, dim_ff = 128, 0, 0, 0
     elif model_type == 'transformer_diffusion':
@@ -311,11 +360,19 @@ def _create_notebook(
         raise ValueError(f'Unsupported Kaggle model type: {model_type}')
 
     if model_type == 'transformer':
-        model_code = _build_transformer_model_code(d_model, nhead, num_layers, dim_ff)
+        model_code = _build_transformer_model_code(d_model, nhead, num_layers, dim_ff,
+                                                   recurrent_depth, moe_experts, moe_active,
+                                                   encoder_name if encoder_name else None,
+                                                   context_dim if encoder_name else None,
+                                                   window_size)
         train_code = _build_transformer_train_code(
-            air_weight, d_model, nhead, num_layers, dim_ff
+            air_weight, d_model, nhead, num_layers, dim_ff,
+            encoder_name if encoder_name else None, context_dim if encoder_name else None,
+            recurrent_depth, moe_experts, moe_active, window_size,
         )
-        model_desc = 'Shared-Weight Voxel Transformer'
+        model_desc = 'Per-Token Recurrent DiT' if recurrent_depth > 1 else 'Shared-Weight Voxel Transformer'
+        if moe_experts:
+            model_desc += f' with MoE ({moe_active}/{moe_experts} active experts)'
     elif model_type == 'diffusion':
         model_code = _build_diffusion_model_code()
         train_code = _build_diffusion_train_code(air_weight)
@@ -347,38 +404,34 @@ def _create_notebook(
                 'import os, sys, time, zipfile\n'
                 'from pathlib import Path\n'
                 "input_root = Path('/kaggle/input')\n"
-                "data_archives = sorted(input_root.rglob('training_data.zip')) if input_root.exists() else []\n"
+                "source_roots = [p.parent for p in input_root.rglob('train.py') if (p.parent/'dataset.py').is_file() and (p.parent/'app').is_dir()] if input_root.exists() else []\n"
                 "source_archives = sorted(input_root.rglob('source_code.zip')) if input_root.exists() else []\n"
-                "if not data_archives and Path('training_data.zip').is_file():\n"
-                "    data_archives = [Path('training_data.zip')]\n"
-                "if not data_archives:\n"
-                "    raise FileNotFoundError('training_data.zip not found in Kaggle inputs; attach the generated dataset.')\n"
-                "if not source_archives:\n"
-                "    raise FileNotFoundError('source_code.zip not found in Kaggle inputs; attach the generated dataset.')\n"
-                "archive = data_archives[0]\n"
-                "source_archive = source_archives[0]\n"
-                "source_root = Path('/kaggle/working/minecraft-source')\n"
-                'source_root.mkdir(parents=True, exist_ok=True)\n'
-                'with zipfile.ZipFile(source_archive) as zf:\n'
-                '    bad_member = next((n for n in zf.namelist() if Path(n).is_absolute() or ".." in Path(n).parts), None)\n'
-                '    if bad_member:\n'
-                '        raise ValueError(f"Unsafe path in source archive: {bad_member}")\n'
-                '    zf.extractall(source_root)\n'
-                "if not (source_root / 'train.py').is_file() or not (source_root / 'app').is_dir():\n"
-                "    raise FileNotFoundError('Training source archive is incomplete.')\n"
+                "if source_roots:\n"
+                "    source_root = source_roots[0]\n"
+                "elif source_archives:\n"
+                "    source_root = Path('/kaggle/working/minecraft-source'); source_root.mkdir(parents=True, exist_ok=True)\n"
+                '    with zipfile.ZipFile(source_archives[0]) as zf:\n'
+                '        bad = next((n for n in zf.namelist() if Path(n).is_absolute() or ".." in Path(n).parts), None)\n'
+                '        if bad: raise ValueError(f"Unsafe path in source archive: {bad}")\n'
+                '        zf.extractall(source_root)\n'
+                "    matches = list(source_root.rglob('train.py'))\n"
+                "    if not matches: raise FileNotFoundError('Training source archive is incomplete.')\n"
+                "    source_root = matches[0].parent\n"
+                "else: raise FileNotFoundError('Training source not found in Kaggle inputs.')\n"
                 'sys.path.insert(0, str(source_root))\n'
-                "data_root = Path('/kaggle/working/data')\n"
-                'data_root.mkdir(parents=True, exist_ok=True)\n'
-                'with zipfile.ZipFile(archive) as zf:\n'
-                '    bad_member = next((n for n in zf.namelist() if Path(n).is_absolute() or ".." in Path(n).parts), None)\n'
-                '    if bad_member:\n'
-                '        raise ValueError(f"Unsafe path in training archive: {bad_member}")\n'
-                '    zf.extractall(data_root)\n'
+                "data_archives = sorted(input_root.rglob('training_data.zip')) if input_root.exists() else []\n"
+                "if data_archives:\n"
+                "    data_root = Path('/kaggle/working/data'); data_root.mkdir(parents=True, exist_ok=True)\n"
+                '    with zipfile.ZipFile(data_archives[0]) as zf:\n'
+                '        bad = next((n for n in zf.namelist() if Path(n).is_absolute() or ".." in Path(n).parts), None)\n'
+                '        if bad: raise ValueError(f"Unsafe path in training archive: {bad}")\n'
+                '        zf.extractall(data_root)\n'
+                "else: data_root = input_root\n"
                 "schematics = list(data_root.rglob('*.schem')) + list(data_root.rglob('*.schematic'))\n"
                 "if not schematics:\n"
                 "    raise RuntimeError('Training archive contains no .schem/.schematic files.')\n"
                 'print(f"Source: {source_root}")\n'
-                'print(f"Training archive: {archive}")\n'
+                'print(f"Data root: {data_root}")\n'
                 'print(f"Structures found: {len(schematics)}")'
             ),
             _code_cell(
@@ -390,6 +443,7 @@ def _create_notebook(
                 f'AUG_DIVERSITY = {aug_diversity}\n'
                 f'ALLOW_VERTICAL = {allow_vertical_flag}\n'
                 f'AIR_WEIGHT = {air_weight}\n'
+                'NOISE_BLOCK_PROB = 0.20\n'
                 'import torch\n'
                 "DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')\n"
                 'print(f"Device: {DEVICE}")\n'
@@ -402,10 +456,14 @@ def _create_notebook(
                 '# Load data and initialize the training loader.\n'
                 'from dataset import MultiSourceSchematicDataset\n'
                 'from torch.utils.data import DataLoader\n'
+                'def report_data_progress(done, total):\n'
+                '    if done % 25 == 0 or done == total:\n'
+                '        print(f"Data preparation: {done}/{total} structures checked ({100*done/max(1,total):.0f}%)", flush=True)\n'
                 'dataset = MultiSourceSchematicDataset(\n'
                 '    [str(data_root)], target_size=GRID_SIZE, max_voxels=400_000,\n'
                 '    augmentation_diversity=AUG_DIVERSITY,\n'
                 '    allow_vertical_movement=ALLOW_VERTICAL, air_weight_factor=AIR_WEIGHT,\n'
+                '    progress_callback=report_data_progress,\n'
                 ')\n'
                 "if len(dataset) == 0:\n"
                 '    raise RuntimeError("No usable prompt/structure training examples were discovered.")\n'
@@ -437,9 +495,14 @@ def _create_notebook(
     with notebook_path.open('w', encoding='utf-8') as handle:
         json.dump(notebook, handle, indent=1, ensure_ascii=False)
     print(f'  Notebook created: {notebook_path}')
-def _build_transformer_model_code(d_model, nhead, num_layers, dim_ff):
-    return (
+def _build_transformer_model_code(d_model, nhead, num_layers, dim_ff, recurrent_depth=4,
+                                  moe_experts=0, moe_active=1,
+                                  text_encoder_name=None, context_dim=None, window_size=8):
+    encoder_dim = int(context_dim or 0) if text_encoder_name else 0
+    code = (
         "# Create model\n"
+        "import math\n"
+        "from model import SharedWeightVoxelTransformer\n"
         "model = SharedWeightVoxelTransformer(\n"
         "    text_vocab_size=len(dataset.prompt_tokenizer.token_to_id),\n"
         "    block_vocab_size=len(dataset.voxel_tokenizer.id_to_block),\n"
@@ -448,14 +511,29 @@ def _build_transformer_model_code(d_model, nhead, num_layers, dim_ff):
         f"    nhead={nhead},\n"
         f"    num_layers={num_layers},\n"
         f"    dim_feedforward={dim_ff},\n"
+        f"    recurrent_depth={recurrent_depth}, moe_experts={moe_experts}, moe_active={moe_active},\n"
+        f"    window_size={window_size},\n"
+        f"    text_input_dim={encoder_dim}, text_encoder_name={text_encoder_name!r},\n"
         "    dropout=0.1,\n"
         ").to(DEVICE)\n\n"
+        "from app.training_memory import plan_transformer_training, describe_training_plan\n"
+        "from app.grad_accum import iter_micro_batches, per_sample_weight_mass, apply_optimizer_step\n"
+        "plan = plan_transformer_training(\n"
+        "    GRID_SIZE, BATCH_SIZE, len(dataset.voxel_tokenizer.id_to_block), device=DEVICE,\n"
+        f"    d_model={d_model}, nhead={nhead}, num_layers={num_layers}, dim_feedforward={dim_ff},\n"
+        f"    window_size={window_size}, recurrent_depth={recurrent_depth}, allow_accumulation=True,\n"
+        ")\n"
+        "print(describe_training_plan(plan, 'en'), flush=True)\n"
+        "if not plan.fits:\n"
+        "    raise RuntimeError('Selected DiT/grid does not fit the available Kaggle GPU memory.')\n"
+        "loader = DataLoader(dataset, batch_size=plan.effective_batch_size, shuffle=True, num_workers=2, pin_memory=True)\n\n"
         "total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)\n"
         "print(f'Trainable parameters: {total_params:,} ({total_params/1e6:.2f}M)')\n\n"
+        "print(f'Active parameters per token: {model.active_parameters:,} ({model.active_parameters/1e6:.2f}M)')\n\n"
         "optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)\n\n"
         "# Cosine LR scheduler with warmup\n"
         "total_steps = EPOCHS * len(loader)\n"
-        "warmup_steps = 500\n\n"
+        "warmup_steps = min(500, max(1, total_steps // 20))\n\n"
         "def lr_lambda(step):\n"
         "    if step < warmup_steps:\n"
         "        return float(step) / max(1, warmup_steps)\n"
@@ -463,9 +541,33 @@ def _build_transformer_model_code(d_model, nhead, num_layers, dim_ff):
         "    return 0.5 * (1.0 + math.cos(progress * math.pi))\n\n"
         "scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)"
     )
+    if text_encoder_name:
+        encoder_setup = (
+            "from app.transformer_encoder import FrozenTransformerEncoder\n"
+            f"dit_encoder = FrozenTransformerEncoder(model_name={text_encoder_name!r}, device=DEVICE, "
+            "dtype=torch.float16 if DEVICE.type == 'cuda' else torch.float32)\n\n"
+        )
+        code = code.replace(
+            "from app.training_memory import plan_transformer_training, describe_training_plan\n",
+            encoder_setup +
+            "from app.training_memory import plan_transformer_training, describe_training_plan\n",
+            1,
+        )
+    return code
 
 
-def _build_transformer_train_code(air_weight, d_model, nhead, num_layers, dim_ff):
+def _build_transformer_train_code(air_weight, d_model, nhead, num_layers, dim_ff,
+                                 text_encoder_name=None, context_dim=None,
+                                 recurrent_depth=4, moe_experts=0, moe_active=1,
+                                 window_size=8):
+    prompt_forward = (
+        "            with torch.no_grad():\n"
+        "                encoded = dit_encoder(list(micro['prompt_text']))\n"
+        "                prompt_embeddings = encoded['last_hidden_state'].to(DEVICE, dtype=next(model.parameters()).dtype)\n"
+        "                prompt_mask = encoded['attention_mask'].to(DEVICE)\n"
+        "            model_inputs = {'prompt_embeddings': prompt_embeddings, 'prompt_attention_mask': prompt_mask}\n"
+        if text_encoder_name else "            model_inputs = {'prompt_ids': prompt_ids}\n"
+    )
     return (
         "# Training Loop\n"
         "best_loss = float('inf')\n"
@@ -475,27 +577,28 @@ def _build_transformer_train_code(air_weight, d_model, nhead, num_layers, dim_ff
         "    model.train()\n"
         "    total_loss = 0.0\n"
         "    num_batches = 0\n\n"
+        "    log_interval = max(1, min(50, (len(loader) + 19) // 20))\n"
         "    for batch in loader:\n"
-        "        prompt_ids = batch['prompt_ids'].to(DEVICE, non_blocking=True)\n"
-        "        target = batch['voxel_ids'].to(DEVICE, non_blocking=True).reshape(prompt_ids.shape[0], -1)\n"
-        "        target = model.safe_clamp_target(target)\n\n"
-        "        logits = model(prompt_ids)\n"
-        "        target_flat = target.reshape(-1)\n"
-        "        sample_weight = batch['sample_weight'].to(DEVICE).view(-1, 1)\n"
-        "        sample_weight = sample_weight.expand_as(target).reshape(-1)\n"
-        "        per_block_w = batch['per_block_weight'].to(DEVICE).view(-1, 1).expand_as(target).reshape(-1)\n"
-        "        per_air_w = batch['per_air_weight'].to(DEVICE).view(-1, 1).expand_as(target).reshape(-1)\n"
-        "        weight_per_token = torch.where(target_flat == 0, per_air_w, per_block_w) * sample_weight\n"
-        "        logp = torch.log_softmax(logits.reshape(-1, logits.shape[-1]), dim=-1)\n"
-        "        nll = torch.nn.functional.nll_loss(logp, target_flat, reduction='none')\n"
-        "        loss = (nll * weight_per_token).sum() / weight_per_token.sum().clamp_min(1.0)\n\n"
+        "        masses = per_sample_weight_mass(batch['voxel_ids'], batch) if plan.accumulated else None\n"
         "        optimizer.zero_grad(set_to_none=True)\n"
-        "        loss.backward()\n"
-        "        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)\n"
-        "        optimizer.step()\n"
+        "        batch_loss = 0.0\n"
+        "        for micro, share in iter_micro_batches(batch, plan.batch_size, sample_mass=masses):\n"
+        "            prompt_ids = micro['prompt_ids'].to(DEVICE, non_blocking=True)\n"
+        "            target = micro['voxel_ids'].to(DEVICE, non_blocking=True).reshape(prompt_ids.shape[0], -1)\n"
+        "            target = model.safe_clamp_target(target)\n\n"
+        + prompt_forward +
+        "            sample_weight = micro['sample_weight'].to(DEVICE).view(-1, 1).expand_as(target)\n"
+        "            per_block_w = micro['per_block_weight'].to(DEVICE).view(-1, 1).expand_as(target)\n"
+        "            per_air_w = micro['per_air_weight'].to(DEVICE).view(-1, 1).expand_as(target)\n"
+        "            weight_per_token = torch.where(target == 0, per_air_w, per_block_w) * sample_weight\n"
+        "            loss = model.backward_weighted_loss(target, weight_per_token, chunk_voxels=512, grad_scale=share, **model_inputs)\n"
+        "            batch_loss += float(loss) * share\n"
+        "        apply_optimizer_step(model, optimizer, max_norm=1.0)\n"
         "        scheduler.step()\n\n"
-        "        total_loss += float(loss.detach())\n"
+        "        total_loss += batch_loss\n"
         "        num_batches += 1\n\n"
+        "        if num_batches % log_interval == 0 or num_batches == len(loader):\n"
+        "            print(f'  step={num_batches}/{len(loader)} ({100*num_batches/max(1,len(loader)):.0f}%)  loss_so_far={total_loss/max(1,num_batches):.4f}', flush=True)\n\n"
         "    avg_loss = total_loss / max(num_batches, 1)\n"
         "    loss_history.append(avg_loss)\n"
         "    elapsed = time.time() - start_time\n\n"
@@ -511,6 +614,12 @@ def _build_transformer_train_code(air_weight, d_model, nhead, num_layers, dim_ff
         f"            'nhead': {nhead},\n"
         f"            'layers': {num_layers},\n"
         f"            'dim_feedforward': {dim_ff},\n"
+        f"            'recurrent_depth': {recurrent_depth},\n"
+        f"            'window_size': {window_size},\n"
+        f"            'moe_experts': {moe_experts},\n"
+        f"            'moe_active': {moe_active},\n"
+        f"            'text_encoder_name': {text_encoder_name!r},\n"
+        f"            'text_input_dim': {int(context_dim or 0) if text_encoder_name else 0},\n"
         "            'augmentation_diversity': AUG_DIVERSITY,\n"
         "            'allow_vertical_movement': ALLOW_VERTICAL,\n"
         "            'epoch': epoch,\n"
@@ -547,10 +656,13 @@ def _build_diffusion_train_code(air_weight):
         "    model.train()\n"
         "    total_loss = 0.0\n"
         "    num_batches = 0\n\n"
+        "    log_interval = max(1, min(50, (len(loader) + 19) // 20))\n"
         "    for batch in loader:\n"
         "        loss = train_diffusion_step(model, batch, optimizer, DEVICE, noise_block_prob=NOISE_BLOCK_PROB)\n"
         "        total_loss += loss\n"
         "        num_batches += 1\n\n"
+        "        if num_batches % log_interval == 0 or num_batches == len(loader):\n"
+        "            print(f'  step={num_batches}/{len(loader)} ({100*num_batches/max(1,len(loader)):.0f}%)  loss_so_far={total_loss/max(1,num_batches):.4f}', flush=True)\n\n"
         "    avg_loss = total_loss / max(num_batches, 1)\n"
         "    loss_history.append(avg_loss)\n"
         "    elapsed = time.time() - start_time\n\n"
@@ -611,6 +723,17 @@ def _build_tf_diffusion_model_code(channels, ch_mult, d_model, ca_heads, encoder
         "for param in encoder.parameters():\n"
         "    param.requires_grad = False\n"
         f"print(f'Encoder loaded: {{encoder_name}}')\n\n"
+        "from app.training_memory import plan_diffusion_training, describe_training_plan\n"
+        "from app.grad_accum import apply_optimizer_step, iter_micro_batches, per_sample_weight_mass\n"
+        "plan = plan_diffusion_training(\n"
+        "    GRID_SIZE, BATCH_SIZE, model.num_blocks, device=DEVICE,\n"
+        f"    channels={channels}, channel_multipliers=({ch_mult_str}), d_model={d_model},\n"
+        f"    cross_attn_heads={ca_heads}, context_dim={context_dim}, context_len=512,\n"
+        ")\n"
+        "print(describe_training_plan(plan, 'en'), flush=True)\n"
+        "if not plan.fits:\n"
+        "    raise RuntimeError('Selected TF-Diffusion/grid does not fit the available Kaggle GPU memory.')\n"
+        "loader = DataLoader(dataset, batch_size=plan.effective_batch_size, shuffle=True, num_workers=2, pin_memory=True)\n"
         f"ENCODER_DISPLAY_NAME = '{encoder_name}'\n"
         f"ENCODER_HF_ID = '{hf_id}'\n"
         f"ENCODER_HIDDEN_DIM = {context_dim}\n"
@@ -621,13 +744,13 @@ def _build_tf_diffusion_train_code(air_weight, encoder_name="Phi-3.5-mini", cont
     is_t5 = "t5" in encoder_name.lower()
     if is_t5:
         context_extract = (
-            "            outputs = encoder(input_ids=input_ids, attention_mask=attention_mask)\n"
-            "            context = outputs.last_hidden_state.to(dtype=next(model.parameters()).dtype)\n"
+            "                outputs = encoder(input_ids=input_ids, attention_mask=attention_mask)\n"
+            "                context = outputs.last_hidden_state.to(dtype=next(model.parameters()).dtype)\n"
         )
     else:
         context_extract = (
-            "            outputs = encoder(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)\n"
-            "            context = outputs.hidden_states[-1].to(dtype=next(model.parameters()).dtype)\n"
+            "                outputs = encoder(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)\n"
+            "                context = outputs.hidden_states[-1].to(dtype=next(model.parameters()).dtype)\n"
         )
     return (
         "# Training Loop\n"
@@ -638,16 +761,25 @@ def _build_tf_diffusion_train_code(air_weight, encoder_name="Phi-3.5-mini", cont
         "    model.train()\n"
         "    total_loss = 0.0\n"
         "    num_batches = 0\n\n"
+        "    log_interval = max(1, min(50, (len(loader) + 19) // 20))\n"
         "    for batch in loader:\n"
-        "        prompts = batch.get('prompt_text', None)\n"
-        "        with torch.no_grad():\n"
-        "            encoded = tokenizer(prompts, return_tensors='pt', padding=True, truncation=True, max_length=512)\n"
-        "            input_ids = encoded['input_ids'].to(DEVICE)\n"
-        "            attention_mask = encoded['attention_mask'].to(DEVICE)\n"
+        "        masses = per_sample_weight_mass(batch['voxel_ids'], batch) if plan.accumulated else None\n"
+        "        optimizer.zero_grad(set_to_none=True)\n"
+        "        batch_loss = 0.0\n"
+        "        for micro, share in iter_micro_batches(batch, plan.batch_size, sample_mass=masses):\n"
+        "            prompts = micro.get('prompt_text', None)\n"
+        "            with torch.no_grad():\n"
+        "                encoded = tokenizer(prompts, return_tensors='pt', padding=True, truncation=True, max_length=512)\n"
+        "                input_ids = encoded['input_ids'].to(DEVICE)\n"
+        "                attention_mask = encoded['attention_mask'].to(DEVICE)\n"
         + context_extract +
-        "        loss = train_transformer_diffusion_step(model, batch, type('FakeEncoder', (), {'__call__': lambda self, x: {'last_hidden_state': context, 'attention_mask': attention_mask}})(), optimizer, DEVICE, noise_block_prob=NOISE_BLOCK_PROB)\n"
-        "        total_loss += loss\n"
+        "            loss = train_transformer_diffusion_step(model, micro, type('FakeEncoder', (), {'__call__': lambda self, x: {'last_hidden_state': context, 'attention_mask': attention_mask}})(), optimizer, DEVICE, noise_block_prob=NOISE_BLOCK_PROB, chunk_voxels=plan.chunk_voxels, accumulate=True, grad_scale=share)\n"
+        "            batch_loss += loss * share\n"
+        "        apply_optimizer_step(model, optimizer, max_norm=1.0)\n"
+        "        total_loss += batch_loss\n"
         "        num_batches += 1\n\n"
+        "        if num_batches % log_interval == 0 or num_batches == len(loader):\n"
+        "            print(f'  step={num_batches}/{len(loader)} ({100*num_batches/max(1,len(loader)):.0f}%)  loss_so_far={total_loss/max(1,num_batches):.4f}', flush=True)\n\n"
         "    avg_loss = total_loss / max(num_batches, 1)\n"
         "    loss_history.append(avg_loss)\n"
         "    elapsed = time.time() - start_time\n\n"
@@ -693,8 +825,13 @@ def _create_readme(
     gx, gy, gz = grid_size
 
     # Build architecture description
-    if model_type == "transformer" and architecture:
-        arch_str = f"d_model={architecture.get('d_model', 192)}, nhead={architecture.get('nhead', 6)}, layers={architecture.get('num_layers', 5)}, FFN={architecture.get('dim_feedforward', 768)}"
+    if model_type == "transformer":
+        arch = architecture or {}
+        arch_str = (f"d_model={arch.get('d_model', 192)}, nhead={arch.get('nhead', 6)}, "
+                    f"max_depth={max(2, int(arch.get('recurrent_depth', 4)))}, "
+                    f"window={arch.get('window_size', 8)}³, "
+                    f"MoE={arch.get('moe_active', 1)}/{arch.get('moe_experts', 0)}, "
+                    f"FFN={arch.get('dim_feedforward', 768)}")
     elif model_type == "diffusion":
         arch_str = "d_model=128, d_text=64, channels=64, (1,2,2)"
     elif model_type == "transformer_diffusion" and tf_unet_config:
@@ -705,7 +842,7 @@ def _create_readme(
         arch_str = "d_model=192, nhead=6, layers=5, FFN=768"
 
     model_desc = {
-        "transformer": "Shared-Weight Voxel Transformer",
+        "transformer": "Per-Token Recurrent DiT",
         "diffusion": "3D Voxel Diffusion Model",
         "transformer_diffusion": "Transformer Diffusion Model",
     }.get(model_type, "Transformer")
@@ -760,7 +897,8 @@ def _create_readme(
 ## Notes
 
 - Training typically takes **2-8 hours** on 2× T4 GPUs depending on dataset size.
-- The notebook uses cosine LR scheduling with 500-step warmup (transformer only).
+- The DiT notebook uses cosine LR scheduling with a warmup of up to 500 steps,
+  scaled down for shorter runs.
 - Loss weighting uses adaptive per-structure weights with air_weight={air_weight}.
 - If you want to train a different architecture, edit the model creation cell.
 """
