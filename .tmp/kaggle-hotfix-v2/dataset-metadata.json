@@ -1,0 +1,10 @@
+{
+  "title": "Minecraft AI Source Hotfix 20261024",
+  "id": "raphbre/minecraft-ai-source-hotfix-20261024",
+  "licenses": [
+    {
+      "name": "other"
+    }
+  ],
+  "description": "Kaggle source update: malformed schematic skipping and one intermediate-capacity 48-cubed training model."
+}

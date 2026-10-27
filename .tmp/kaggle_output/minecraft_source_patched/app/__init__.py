@@ -1,0 +1,1 @@
+"""Minecraft Structure Generator - Complete Application Package."""

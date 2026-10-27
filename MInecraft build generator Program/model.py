@@ -445,6 +445,12 @@ class VoxelTransformer(nn.Module):
             weights = torch.where(air, weights * keep_air / (1.0 - mask_ratio), weights)
         step = voxels if not chunk_voxels else max(1, min(voxels, int(chunk_voxels)))
         total_loss = decoded.new_zeros(())
+        # The output head is small compared with the voxel decoder, but calling
+        # backward() for every output chunk repeatedly traverses the full
+        # decoder graph. Accumulate gradients at the decoded features and
+        # backpropagate through the decoder once after all output chunks.
+        decoded_grad = torch.zeros_like(decoded)
+        output_parameters = tuple(p for p in self.output.parameters() if p.requires_grad)
 
         for start in range(0, voxels, step):
             end = min(start + step, voxels)
@@ -459,8 +465,24 @@ class VoxelTransformer(nn.Module):
             )
             chunk_weights = chunk_weights.reshape(-1)[selected]
             loss = (nll * chunk_weights).sum() / denominator
-            (loss * float(grad_scale)).backward(retain_graph=end < voxels)
+            gradients = torch.autograd.grad(
+                loss * float(grad_scale),
+                (chunk_features, *output_parameters),
+                retain_graph=False,
+                allow_unused=True,
+            )
+            feature_grad = gradients[0]
+            feature_grad_chunk = torch.zeros_like(decoded[:, start:end, :])
+            feature_grad_chunk.reshape(-1, decoded.shape[-1])[selected] = feature_grad
+            decoded_grad[:, start:end, :].add_(feature_grad_chunk)
+            for parameter, grad in zip(output_parameters, gradients[1:]):
+                if grad is not None:
+                    if parameter.grad is None:
+                        parameter.grad = grad
+                    else:
+                        parameter.grad.add_(grad)
             total_loss = total_loss + loss.detach()
+        decoded.backward(decoded_grad)
         return float(total_loss)
 
     def decoded(self, prompt_ids: torch.Tensor | None = None,

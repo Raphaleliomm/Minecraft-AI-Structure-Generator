@@ -1,0 +1,145 @@
+[{"stream_name":"stderr","time":6.91859511,"data":"/usr/local/lib/python3.13/dist-packages/nbformat/validator.py:434: MissingIDFieldWarning: Cell is missing an id field, this will become a hard error in future nbformat versions. You may want to use `normalize()` on your notebooks before validations (available since nbformat 5.1.4). Previous versions of nbformat are fixing this issue transparently, and will stop doing so in the future.\n"}
+,{"stream_name":"stderr","time":6.91863935,"data":"  _validate(nbdict, ref, version, version_minor, relax_add_props)\n"}
+,{"stream_name":"stderr","time":7.888599228,"data":"0.00s - Debugger warning: It seems that frozen modules are being used, which may\n"}
+,{"stream_name":"stderr","time":7.888625193,"data":"0.00s - make the debugger miss breakpoints. Please pass -Xfrozen_modules=off\n"}
+,{"stream_name":"stderr","time":7.888629802,"data":"0.00s - to python to disable frozen modules.\n"}
+,{"stream_name":"stderr","time":7.888633486,"data":"0.00s - Note: Debugging will proceed. Set PYDEVD_DISABLE_FILE_VALIDATION=1 to disable this validation.\n"}
+,{"stream_name":"stderr","time":8.486658549,"data":"0.00s - Debugger warning: It seems that frozen modules are being used, which may\n"}
+,{"stream_name":"stderr","time":8.486687493,"data":"0.00s - make the debugger miss breakpoints. Please pass -Xfrozen_modules=off\n"}
+,{"stream_name":"stderr","time":8.486692609,"data":"0.00s - to python to disable frozen modules.\n"}
+,{"stream_name":"stderr","time":8.486696223,"data":"0.00s - Note: Debugging will proceed. Set PYDEVD_DISABLE_FILE_VALIDATION=1 to disable this validation.\n"}
+,{"stream_name":"stdout","time":12.809048537,"data":"Schematic dependency ready\n"}
+,{"stream_name":"stdout","time":23.737761774,"data":"Patched source: /kaggle/working/minecraft_source_patched\n"}
+,{"stream_name":"stdout","time":30.517494374,"data":"Source: /kaggle/working/minecraft_source_patched data: /kaggle/input/minecraft-ai-training-20261024-185254/training_data structures: 13844\n"}
+,{"stream_name":"stdout","time":35.977361788,"data":"GPU: Tesla T4\n"}
+,{"stream_name":"stdout","time":37.491798377,"data":"GPU: Tesla T4 | torch=2.11.0+cu128\n"}
+,{"stream_name":"stdout","time":37.69407687,"data":"GPU: Tesla T4 | torch=2.11.0+cu128\n"}
+,{"stream_name":"stdout","time":1110.298888561,"data":"Holdout-Kandidat übersprungen: base-survival-m-pzvd3xul__BASE-SHULKERCRAFT-V2.schem: base-survival-m-pzvd3xul__BASE-SHULKERCRAFT-V2.schem: 240x65x240 = 3,744,000 Voxel ueberschreitet das Limit von 400,000 Voxel\n"}
+,{"stream_name":"stdout","time":1110.502597044,"data":"Holdout-Kandidat übersprungen: base-survival-m-pzvd3xul__BASE-SHULKERCRAFT-V2.schem: base-survival-m-pzvd3xul__BASE-SHULKERCRAFT-V2.schem: 240x65x240 = 3,744,000 Voxel ueberschreitet das Limit von 400,000 Voxel\n"}
+,{"stream_name":"stdout","time":1111.203947961,"data":"Holdout-Kandidat übersprungen: abfielder-8332__warden-mob-statues-9.schem: abfielder-8332__warden-mob-statues-9.schem: 72x78x80 = 449,280 Voxel ueberschreitet das Limit von 400,000 Voxel\n"}
+,{"stream_name":"stdout","time":1111.406854904,"data":"Holdout-Kandidat übersprungen: abfielder-8332__warden-mob-statues-9.schem: abfielder-8332__warden-mob-statues-9.schem: 72x78x80 = 449,280 Voxel ueberschreitet das Limit von 400,000 Voxel\n"}
+,{"stream_name":"stdout","time":1112.082870162,"data":"Holdout-Kandidat übersprungen: mc_schematics-berta-1fdf112a01__futuristic-urban-flying-city-airship-berta-schematic-3331842.schem: mc_schematics-berta-1fdf112a01__futuristic-urban-flying-city-airship-berta-schematic-3331842.schem: 333x184x277 = 16,972,344 Voxel ueberschreitet das Limit von 400,000 Voxel\n"}
+,{"stream_name":"stdout","time":1112.285387292,"data":"Holdout-Kandidat übersprungen: mc_schematics-berta-1fdf112a01__futuristic-urban-flying-city-airship-berta-schematic-3331842.schem: mc_schematics-berta-1fdf112a01__futuristic-urban-flying-city-airship-berta-schematic-3331842.schem: 333x184x277 = 16,972,344 Voxel ueberschreitet das Limit von 400,000 Voxel\n"}
+,{"stream_name":"stdout","time":1113.407565098,"data":"Holdout-Kandidat übersprungen: abfielder-2287__foxco-tower-avengers-tower.schem: abfielder-2287__foxco-tower-avengers-tower.schem: 114x162x146 = 2,696,328 Voxel ueberschreitet das Limit von 400,000 Voxel\n"}
+,{"stream_name":"stdout","time":1113.609609065,"data":"Holdout-Kandidat übersprungen: abfielder-2287__foxco-tower-avengers-tower.schem: abfielder-2287__foxco-tower-avengers-tower.schem: 114x162x146 = 2,696,328 Voxel ueberschreitet das Limit von 400,000 Voxel\n"}
+,{"stream_name":"stdout","time":1113.619421109,"data":"Holdout-Kandidat übersprungen: abfielder-6052__big-cliffside-lighthouse-landscape-free.schem: abfielder-6052__big-cliffside-lighthouse-landscape-free.schem: 149x153x131 = 2,986,407 Voxel ueberschreitet das Limit von 400,000 Voxel\n"}
+,{"stream_name":"stdout","time":1113.821389862,"data":"Holdout-Kandidat übersprungen: abfielder-6052__big-cliffside-lighthouse-landscape-free.schem: abfielder-6052__big-cliffside-lighthouse-landscape-free.schem: 149x153x131 = 2,986,407 Voxel ueberschreitet das Limit von 400,000 Voxel\n"}
+,{"stream_name":"stdout","time":1113.965735045,"data":"Holdout-Kandidat übersprungen: abfielder-11877__apex-center-tower.schem: abfielder-11877__apex-center-tower.schem: 84x138x43 = 498,456 Voxel ueberschreitet das Limit von 400,000 Voxel\n"}
+,{"stream_name":"stdout","time":1114.16757827,"data":"Holdout-Kandidat übersprungen: abfielder-11877__apex-center-tower.schem: abfielder-11877__apex-center-tower.schem: 84x138x43 = 498,456 Voxel ueberschreitet das Limit von 400,000 Voxel\n"}
+,{"stream_name":"stdout","time":2519.035186976,"data":"Prompt-Beispiele: 24508 | Val-Strukturen: 20 | einzigartige Build-Hashes: 13740\n"}
+,{"stream_name":"stdout","time":2519.241370566,"data":"Prompt-Beispiele: 24508 | Val-Strukturen: 20 | einzigartige Build-Hashes: 13740\n"}
+,{"stream_name":"stdout","time":2543.821188996,"data":"48³ Train: 500/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2544.023788263,"data":"48³ Train: 500/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2566.883823586,"data":"48³ Train: 1000/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2567.087635463,"data":"48³ Train: 1000/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2590.857816289,"data":"48³ Train: 1500/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2591.060434668,"data":"48³ Train: 1500/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2602.837175152,"data":"48³ Train: 2000/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2603.040809444,"data":"48³ Train: 2000/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2615.297549166,"data":"48³ Train: 2500/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2615.499656679,"data":"48³ Train: 2500/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2633.551703811,"data":"48³ Train: 3000/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2633.755193717,"data":"48³ Train: 3000/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2646.681531224,"data":"48³ Train: 3500/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2646.883743802,"data":"48³ Train: 3500/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2662.199839237,"data":"48³ Train: 4000/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2662.402198948,"data":"48³ Train: 4000/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2676.41857904,"data":"48³ Train: 4500/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2676.622454182,"data":"48³ Train: 4500/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2691.476575652,"data":"48³ Train: 5000/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2691.678857627,"data":"48³ Train: 5000/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2702.464644722,"data":"48³ Train: 5500/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2702.666933437,"data":"48³ Train: 5500/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2718.072011377,"data":"48³ Train: 6000/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2718.277292972,"data":"48³ Train: 6000/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2730.959576189,"data":"48³ Train: 6500/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2731.162330029,"data":"48³ Train: 6500/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2759.902672356,"data":"48³ Train: 7000/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2760.107916537,"data":"48³ Train: 7000/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2777.698263307,"data":"48³ Train: 7500/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2777.900731248,"data":"48³ Train: 7500/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2795.664254782,"data":"48³ Train: 8000/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2795.868718958,"data":"48³ Train: 8000/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2810.913736563,"data":"48³ Train: 8500/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2811.118220606,"data":"48³ Train: 8500/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2826.792406308,"data":"48³ Train: 9000/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2826.996342193,"data":"48³ Train: 9000/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2839.714986919,"data":"48³ Train: 9500/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2839.917140774,"data":"48³ Train: 9500/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2860.388722362,"data":"48³ Train: 10000/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2860.592745559,"data":"48³ Train: 10000/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2865.580469814,"data":"48³ Train: 10500/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2865.782681425,"data":"48³ Train: 10500/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2869.119023589,"data":"48³ Train: 11000/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2869.321446141,"data":"48³ Train: 11000/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2871.418529111,"data":"48³ Train: 11500/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2871.621034046,"data":"48³ Train: 11500/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2878.258173786,"data":"48³ Train: 12000/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2878.460536877,"data":"48³ Train: 12000/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2887.569688086,"data":"48³ Train: 12500/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2887.772587919,"data":"48³ Train: 12500/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2894.893547328,"data":"48³ Train: 13000/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2895.099049412,"data":"48³ Train: 13000/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2904.402991874,"data":"48³ Train: 13500/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2904.605223156,"data":"48³ Train: 13500/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2913.43526804,"data":"48³ Train: 14000/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2913.637577295,"data":"48³ Train: 14000/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2925.980234714,"data":"48³ Train: 14500/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2926.1864621,"data":"48³ Train: 14500/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2943.612889082,"data":"48³ Train: 15000/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2943.815312108,"data":"48³ Train: 15000/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2954.511591271,"data":"48³ Train: 15500/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2954.714227091,"data":"48³ Train: 15500/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2961.893549783,"data":"48³ Train: 16000/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2962.097590202,"data":"48³ Train: 16000/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2972.324425828,"data":"48³ Train: 16500/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2972.526822825,"data":"48³ Train: 16500/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2981.644389984,"data":"48³ Train: 17000/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2981.846969445,"data":"48³ Train: 17000/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2986.377861918,"data":"Malformed schematic skipped: mc_schematics-structure-eb__medieval-church-structure.schem: Expected 86700 block ids, decoded 85676\n"}
+,{"stream_name":"stdout","time":2986.580466796,"data":"Malformed schematic skipped: mc_schematics-structure-eb__medieval-church-structure.schem: Expected 86700 block ids, decoded 85676\n"}
+,{"stream_name":"stdout","time":2989.887690418,"data":"48³ Train: 17500/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2990.089768015,"data":"48³ Train: 17500/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2996.747336588,"data":"48³ Train: 18000/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2996.953935488,"data":"48³ Train: 18000/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":2999.72192488,"data":"Malformed schematic skipped: mc_schematics-y-house-pack__christmas-fantasy-house-pack.schem: Expected 230736 block ids, decoded 230219\n"}
+,{"stream_name":"stdout","time":2999.924023172,"data":"Malformed schematic skipped: mc_schematics-y-house-pack__christmas-fantasy-house-pack.schem: Expected 230736 block ids, decoded 230219\n"}
+,{"stream_name":"stdout","time":3008.635078253,"data":"48³ Train: 18500/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":3008.837234787,"data":"48³ Train: 18500/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":3020.264288699,"data":"48³ Train: 19000/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":3020.466534455,"data":"48³ Train: 19000/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":3027.470843203,"data":"48³ Train: 19500/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":3027.677265723,"data":"48³ Train: 19500/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":3039.903804429,"data":"48³ Train: 20000/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":3040.106282959,"data":"48³ Train: 20000/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":3049.247669643,"data":"48³ Train: 20500/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":3049.450061981,"data":"48³ Train: 20500/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":3064.457454059,"data":"48³ Train: 21000/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":3064.664016388,"data":"48³ Train: 21000/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":3080.839807185,"data":"48³ Train: 21500/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":3081.042231381,"data":"48³ Train: 21500/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":3103.550868642,"data":"48³ Train: 22000/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":3103.758349112,"data":"48³ Train: 22000/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":3116.396551917,"data":"48³ Train: 22500/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":3116.599082082,"data":"48³ Train: 22500/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":3134.071876667,"data":"48³ Train: 23000/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":3134.277353938,"data":"48³ Train: 23000/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":3141.294063217,"data":"48³ Train: 23500/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":3141.496150539,"data":"48³ Train: 23500/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":3159.726606204,"data":"48³ Train: 24000/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":3159.928914703,"data":"48³ Train: 24000/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":3167.855772599,"data":"48³ Train: 24475/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":3168.062768371,"data":"48³ Train: 24475/24475 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":3178.921319899,"data":"48³ Val: 33/33 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":3178.922035703,"data":"48³: train=14245 val=33 blocks=21430\n"}
+,{"stream_name":"stdout","time":3179.123649098,"data":"48³ Val: 33/33 Struktureinträge geprüft\n"}
+,{"stream_name":"stdout","time":3179.123685936,"data":"48³: train=14245 val=33 blocks=21430\n"}
+,{"stream_name":"stdout","time":3179.195301654,"data":"\n"}
+,{"stream_name":"stdout","time":3179.195333946,"data":"=== 48_window8_intermediate ===\n"}
+,{"stream_name":"stdout","time":3179.195339083,"data":"TrainingPlan(batch_size=2, requested_batch_size=16, chunk_voxels=2048, voxels=110592, logits_bytes=18959892480, activation_bytes=11324620800, param_bytes=285595968, estimated_bytes=12663544128, budget_bytes=13197157990, available_bytes=15526068224, fits=True, limit='ok', suggestion='Batch-Groesse von 16 auf 2 reduziert, aber als 8 Mikro-Batches akkumuliert (effektiv 16, Gradient Accumulation) - Attention 10.55 GiB', details={}, accum_steps=8)\n"}
+,{"stream_name":"stdout","time":3179.397627694,"data":"\n"}
+,{"stream_name":"stdout","time":3179.397680651,"data":"=== 48_window8_intermediate ===\n"}
+,{"stream_name":"stdout","time":3179.397688437,"data":"TrainingPlan(batch_size=2, requested_batch_size=16, chunk_voxels=2048, voxels=110592, logits_bytes=18959892480, activation_bytes=11324620800, param_bytes=285595968, estimated_bytes=12663544128, budget_bytes=13197157990, available_bytes=15526068224, fits=True, limit='ok', suggestion='Batch-Groesse von 16 auf 2 reduziert, aber als 8 Mikro-Batches akkumuliert (effektiv 16, Gradient Accumulation) - Attention 10.55 GiB', details={}, accum_steps=8)\n"}
+,{"stream_name":"stdout","time":3179.474691697,"data":"Parameters total=18,649,774 active=18,649,774\n"}
+,{"stream_name":"stdout","time":3179.676949161,"data":"Parameters total=18,649,774 active=18,649,774\n"}
+]
