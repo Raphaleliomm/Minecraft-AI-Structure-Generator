@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import gzip
 import hashlib
@@ -57,6 +58,7 @@ import urllib.robotparser
 import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Iterator
 
@@ -228,6 +230,7 @@ class HttpClient:
             }
         )
         self._last_request: dict[str, float] = {}
+        self._retry_outcomes: dict[str, deque[bool]] = {}
         self.request_count = 0
         self.retry_count = 0
         self.bytes_downloaded = 0
@@ -248,11 +251,19 @@ class HttpClient:
         return min(90.0, 4.0 * (2**attempt)) + random.uniform(0.0, 1.0)
 
     @staticmethod
-    def _retry_after(response: "requests.Response", attempt: int) -> float:
+    def _retry_after(response: "requests.Response", attempt: int, *, skip_short: bool = False) -> float:
         raw = (response.headers.get("Retry-After") or "").strip()
         if raw.isdigit():
-            return min(180.0, float(raw))
-        return min(180.0, 10.0 * (attempt + 1))
+            return float(raw)
+        if raw:
+            try:
+                retry_at = parsedate_to_datetime(raw)
+                if retry_at.tzinfo is None:
+                    retry_at = retry_at.replace(tzinfo=timezone.utc)
+                return max(0.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
+            except (TypeError, ValueError, OverflowError):
+                pass
+        return 10.0 if attempt > 0 or skip_short else 5.0
 
     @staticmethod
     def _is_cloudflare(response: "requests.Response", body: str = "") -> bool:
@@ -274,8 +285,11 @@ class HttpClient:
         allow_404: bool = False,
     ) -> "requests.Response":
         last_error = ""
+        host = urllib.parse.urlparse(url).netloc.lower()
+        outcomes = self._retry_outcomes.setdefault(host, deque(maxlen=100))
+        short_retry = False
         for attempt in range(self.retries + 1):
-            wait = 0.0
+            wait = None
             self._throttle(url)
             response = None
             try:
@@ -287,16 +301,23 @@ class HttpClient:
                     headers=headers,
                 )
             except requests.RequestException as exc:
+                outcomes.append(short_retry)
+                short_retry = False
                 last_error = f"Netzwerkfehler: {exc}"
             else:
                 self.request_count += 1
                 status = response.status_code
+                outcomes.append(short_retry and not (200 <= status < 400))
+                short_retry = False
                 if 200 <= status < 400:
                     return response
                 if allow_404 and status in (404, 410):
                     return response
                 if status == 429 or 500 <= status < 600:
-                    wait = self._retry_after(response, attempt)
+                    wait = self._retry_after(response, attempt, skip_short=sum(outcomes) > 5)
+                    # Nur der lokale 5-Sekunden-Fallback wird ausgewertet;
+                    # explizite Servervorgaben haben immer Vorrang.
+                    short_retry = not response.headers.get("Retry-After", "").strip() and wait == 5.0
                     last_error = f"HTTP {status}"
                     response.close()
                     response = None
@@ -322,9 +343,10 @@ class HttpClient:
 
             if attempt < self.retries:
                 self.retry_count += 1
-                wait = locals().get("wait") or self._backoff(attempt)
+                if wait is None:
+                    wait = self._backoff(attempt)
                 print(
-                    f"    .. {last_error} - warte {wait:.0f}s "
+                    f"    .. {last_error} - warte {wait:.1f}s "
                     f"(Versuch {attempt + 2}/{self.retries + 1})"
                 )
                 time.sleep(wait)
@@ -1384,7 +1406,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--out-root", default=str(DEFAULT_OUT_ROOT), help="Zielordner (je Quelle ein Unterordner)")
     parser.add_argument("--max-items", type=int, default=0, help="Pro Quelle maximal N neue Eintraege verarbeiten (0 = alle)")
     parser.add_argument("--limit", type=int, default=0, help="Lauf nach N verarbeiteten Eintraegen beenden (0 = kein Limit)")
-    parser.add_argument("--delay", type=float, default=1.5, help="Pause zwischen Requests in Sekunden")
+    parser.add_argument("--delay", type=float, default=2.0, help="Pause zwischen Requests in Sekunden")
     parser.add_argument("--workers", type=int, default=3, help="Quellen parallel abarbeiten (1 = nacheinander)")
     parser.add_argument("--jitter", type=float, default=0.8, help="Zufaelliger Zusatz zur Pause")
     parser.add_argument("--timeout", type=float, default=60.0, help="HTTP-Timeout in Sekunden")
