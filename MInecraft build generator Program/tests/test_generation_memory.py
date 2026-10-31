@@ -120,9 +120,9 @@ def test_transformer_generation_attention_is_the_limit():
     32^3: 6 Heads * 32768^2 * 4 Byte = 24 GiB pro Layer - auch ohne Backward
     passt das nicht in 5,1 GiB, also meldet der Plan das statt abzustuerzen.
     """
-    attn, rest = transformer_generation_bytes(REAL_GRID, 1, REAL_VOCAB, 192, 6, 5, 768)
-    assert format_gib(attn) == "120.00"                 # 5 Layer * 24 GiB
-    train_attn, _, _ = transformer_estimates(REAL_GRID, 1, REAL_VOCAB, 192, 6, 5, 768)
+    attn, rest = transformer_generation_bytes(REAL_GRID, 1, REAL_VOCAB, 192, 6, 5, 768, window_size=0)
+    assert attn >= 120 * GIB  # 5 Layer * 24 GiB, plus Text-Attention
+    train_attn, _, _ = transformer_estimates(REAL_GRID, 1, REAL_VOCAB, 192, 6, 5, 768, window_size=0)
     assert attn < train_attn                            # Training haelt Kopien
     plan = plan_generation(REAL_GRID, REAL_VOCAB, device=None,
                            activation_bytes=attn + rest,
@@ -131,7 +131,7 @@ def test_transformer_generation_attention_is_the_limit():
     assert plan.suggestion
 
     # 16^3 ist 64x kleiner und passt mit kleinem Vokabular
-    attn16, rest16 = transformer_generation_bytes((16, 16, 16), 1, 253, 128, 4, 4, 512)
+    attn16, rest16 = transformer_generation_bytes((16, 16, 16), 1, 253, 128, 4, 4, 512, window_size=0)
     assert plan_generation((16, 16, 16), 253, device=None,
                            activation_bytes=attn16 + rest16,
                            budget_bytes=int(5.1 * GIB)).fits

@@ -18,6 +18,8 @@ from app.litematic import (
     detect_structure_format,
     litematic_to_schem,
     read_structure_size,
+    write_sponge_schem,
+    StructureConversionError,
 )
 from dataset import load_schematic
 from scrape_structures import (
@@ -175,6 +177,25 @@ def test_blueprint_conversion_writes_sponge_schem(tmp_path):
     assert data.size == (3, 2, 2)
     assert all(block == "minecraft:stone" for block in data.blocks[:6])
     assert all(block == "minecraft:oak_planks" for block in data.blocks[6:])
+
+
+def test_write_schem_preserves_indices_when_air_is_missing(tmp_path):
+    out = tmp_path / "no_air.schem"
+    write_sponge_schem(out, grid=np.array([[[0]], [[1]]]),
+                       palette=["minecraft:stone", "minecraft:dirt"])
+    assert load_schematic(out).blocks == ["minecraft:stone", "minecraft:dirt"]
+
+
+@pytest.mark.parametrize("grid,palette", [
+    (np.array([[[-1]]]), ["minecraft:air"]),
+    (np.array([[[1]]]), ["minecraft:air"]),
+    (np.array([[[0.5]]]), ["minecraft:air"]),
+    (np.zeros((0, 1, 1), dtype=int), ["minecraft:air"]),
+    (np.array([[[0]]]), ["minecraft:air", "minecraft:air"]),
+])
+def test_write_schem_rejects_invalid_input(tmp_path, grid, palette):
+    with pytest.raises(StructureConversionError):
+        write_sponge_schem(tmp_path / "invalid.schem", grid=grid, palette=palette)
 
 
 def test_blueprint_rejects_inconsistent_rows(tmp_path):

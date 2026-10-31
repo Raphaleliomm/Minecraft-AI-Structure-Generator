@@ -281,6 +281,9 @@ def _start_training_app() -> SimpleNamespace:
     app.train_epoch_bar = _setter()
     app.train_batch_bar = _setter()
     app.train_btn_transformer = _configurable()
+    app.train_btn_dit = _configurable()
+    app.train_model_type_selector = SimpleNamespace(get=lambda: "Transformer")
+    app._get_attention_window_size = lambda: 8
     app.train_btn_diffusion = _configurable()
     app.train_btn_tf_diffusion = _configurable()
     app.train_stop_btn = _configurable()
@@ -431,7 +434,7 @@ def test_sync_training_widgets_mirrors_grid_and_params():
     assert app.entries["batch"].values == ["2"]
     assert app.entries["lr"].values == ["0.0005"]
     assert app.vertical["selected"] is True
-    assert app.panels == ["Transformer", "Transformer"]
+    assert app.panels == ["DiT (Recurrent)", "DiT (Recurrent)"]
     assert app.tab["view"] == "tab_training"
 
 

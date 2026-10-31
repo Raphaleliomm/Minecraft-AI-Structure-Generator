@@ -331,6 +331,8 @@ def _encode_varints(values: Iterable[int]) -> bytes:
     out = bytearray()
     for raw in values:
         value = int(raw)
+        if value < 0:
+            raise StructureConversionError("Negative Palette-Indizes sind ungueltig")
         while True:
             part = value & 0x7F
             value >>= 7
@@ -362,8 +364,18 @@ def write_sponge_schem(
     palette = list(palette)
     if not palette:
         raise StructureConversionError("Leere Palette")
+    if len(set(palette)) != len(palette):
+        raise StructureConversionError("Palette enthaelt doppelte Blocknamen")
+    grid = np.asarray(grid)
+    if grid.ndim != 3 or any(value <= 0 for value in grid.shape):
+        raise StructureConversionError(f"Ungueltige Grid-Groesse: {grid.shape}")
+    if not np.issubdtype(grid.dtype, np.integer):
+        raise StructureConversionError("Grid muss ganzzahlige Palette-Indizes enthalten")
+    if np.any(grid < 0) or np.any(grid >= len(palette)):
+        raise StructureConversionError("Grid enthaelt ungueltige Palette-Indizes")
     if AIR not in palette:
         palette = [AIR, *palette]
+        grid = grid.astype(np.int64) + 1
     width, height, length = (int(value) for value in grid.shape)
     if max(width, height, length) > MAX_DIMENSION:
         raise StructureConversionError(f"Dimension {grid.shape} > {MAX_DIMENSION}")

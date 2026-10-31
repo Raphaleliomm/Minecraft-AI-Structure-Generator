@@ -149,7 +149,7 @@ def test_transformer_plan_accumulates_without_changing_the_goal():
     plan = plan_transformer_training(
         (16, 16, 16), 16, REAL_VOCAB, device=torch.device("cuda"),
         d_model=192, nhead=6, num_layers=5, dim_feedforward=768,
-        budget_bytes=int(3.0 * GIB),
+        budget_bytes=int(3.0 * GIB), window_size=0,
     )
     assert plan.fits and plan.reduced
     assert plan.batch_size == 1                  # physisch passt nur ein Beispiel
@@ -177,11 +177,11 @@ def test_transformer_plan_refuses_huge_attention_matrices():
     plan = plan_transformer_training(
         REAL_GRID, 4, REAL_VOCAB, device=torch.device("cuda"),
         d_model=192, nhead=6, num_layers=5, dim_feedforward=768,
-        budget_bytes=int(5.1 * GIB),
+        budget_bytes=int(5.1 * GIB), window_size=0,
     )
     assert plan.fits is False
     assert plan.limit == "attention"
-    assert format_gib(plan.activation_bytes) == "144.00"   # 6 Matrizen a 24 GiB
+    assert plan.activation_bytes >= 144 * GIB  # 6 Matrizen a 24 GiB, plus Text
     assert "Grid 16x16x16" in (plan.suggestion or "")
 
 
